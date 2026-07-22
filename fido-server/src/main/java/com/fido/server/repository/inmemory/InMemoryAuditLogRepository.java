@@ -2,6 +2,7 @@ package com.fido.server.repository.inmemory;
 
 import com.fido.server.domain.AuditLog;
 import com.fido.server.repository.AuditLogRepository;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
 
 import java.util.Comparator;
@@ -17,6 +18,7 @@ import java.util.stream.Collectors;
  * （devops-engineer 於真實 DB 依 db-schema.md 附錄建置）。
  */
 @Repository
+@ConditionalOnProperty(prefix = "fido.persistence", name = "mode", havingValue = "memory")
 public class InMemoryAuditLogRepository implements AuditLogRepository {
 
     private final Map<Long, AuditLog> byId = new ConcurrentHashMap<>();

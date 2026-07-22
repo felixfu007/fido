@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# 測試預設設定檔。位於 src/test/resources，Maven 編譯測試時 target/test-classes 會排在
+# target/classes 之前，所以「沒有另外指定 Spring profile」的測試（現有 34 個測試 +
+# FidoServerApplicationTests context load 測試）一律吃到這份設定，而不是
+# src/main/resources/application.yml（正式部署預設值）。
+#
+# 與正式版最主要的差異：fido.persistence.mode 改為 memory（純 in-memory repository，見
+# com.fido.server.repository.inmemory），刻意不需要任何 DataSource/SQL Server/H2 —— 這樣現有
+# 測試對 persistence 層的替換完全無感，也不會因為本機沒有可連線的 SQL Server 而失敗。
+#
+# 若要讓某個測試改走 JPA + H2（本機開發用資料庫），該測試類別需另外用
+# @ActiveProfiles("h2") 啟用 application-h2.yml（見該檔），其設定會疊加在本檔之上並覆寫
+# fido.persistence.mode 等必要屬性。
+# ---------------------------------------------------------------------------
+server:
+  port: 8443
+
+spring:
+  application:
+    name: fido-server
+  jackson:
+    default-property-inclusion: non_null
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+fido:
+  persistence:
+    mode: memory
+  challenge:
+    ttl-seconds: 60
+  session-jwt:
+    issuer: "https://fido.example.internal"
+    ttl-seconds: 120
+    kid: "2026-fido-1"
+  rate-limit:
+    default-tps: 100
+  attestation:
+    mode: real
+    stub:
+      chain-valid: true
+      default-security-level: STRONG_BOX
+  dev-seed:
+    enabled: true
+    tenant-name: "Demo Shop"
+    rp-id: "shop.example.com"
+    expected-origin: "https://shop.example.com"
+    api-key: "dev-api-key-00000000000000000000"
+
+logging:
+  level:
+    com.fido.server: INFO

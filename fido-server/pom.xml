@@ -41,6 +41,27 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!--
+            Persistence 層（見 com.fido.server.repository.jpa.*）。fido.persistence.mode=jpa
+            （預設，對齊 CLAUDE.md「獨立 SQL Server 實例」）時才會實際建立 DataSource / EntityManager
+            （見 com.fido.server.config.JpaInfrastructureConfig）；mode=memory 時完全不會用到，
+            但 starter 本身必須在 main scope 才能讓 Spring Data JPA repository 介面編譯/掃描得到。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!--
+            正式環境資料庫驅動（獨立 SQL Server 實例，見 CLAUDE.md）。main scope：待
+            devops-engineer 提供可連線的 SQL Server 環境後，僅需調整
+            spring.datasource.url/username/password 等連線設定即可接上，不需改程式碼／改 scope。
+        -->
+        <dependency>
+            <groupId>com.microsoft.sqlserver</groupId>
+            <artifactId>mssql-jdbc</artifactId>
+        </dependency>
+
         <!-- CBOR 解碼（WebAuthn attestationObject 為 CBOR 格式）；用於解析 fmt/authData/attStmt 頂層結構。 -->
         <dependency>
             <groupId>com.fasterxml.jackson.dataformat</groupId>
@@ -98,6 +119,19 @@
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcpkix-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            H2（MSSQL 相容模式，見 src/test/resources/application-h2.yml 的
+            jdbc:h2:...;MODE=MSSQL 連線字串）：僅供本機開發/測試時模擬 SQL Server，把
+            JPA/persistence 層真的接起來、跑過一次真實 SQL 執行路徑。test scope：
+            不會被 spring-boot-maven-plugin repackage 進部署產物，也不會出現在
+            `mvn spring-boot:run` 的執行期 classpath，避免正式部署誤用 H2。
+        -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

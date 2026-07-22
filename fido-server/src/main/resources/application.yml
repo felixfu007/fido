@@ -6,6 +6,33 @@ spring:
     name: fido-server
   jackson:
     default-property-inclusion: non_null
+  # ---------------------------------------------------------------------------
+  # Persistence（正式部署預設路徑）：獨立 SQL Server 實例（見 CLAUDE.md），僅在
+  # fido.persistence.mode=jpa（下方預設值）時才會實際生效（見
+  # com.fido.server.config.JpaInfrastructureConfig）。
+  #
+  # 下列 datasource 連線資訊皆為【佔位值】，devops-engineer 建置正式/測試 SQL Server 環境後，
+  # 務必以實際主機、帳密（建議走環境變數或密碼管理工具，不要把正式密碼寫回這個檔案並進版控）
+  # 覆寫。本機開發若沒有可連線的 SQL Server，請改用 fido.persistence.mode=memory（純
+  # in-memory，見 com.fido.server.repository.inmemory）或本專案測試用的 H2 profile（僅存在於
+  # src/test/resources/application-h2.yml，不會出現在正式部署路徑）。
+  # ---------------------------------------------------------------------------
+  datasource:
+    url: "jdbc:sqlserver://REPLACE_WITH_SQLSERVER_HOST:1433;databaseName=FidoServerDb;encrypt=true;trustServerCertificate=false"
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+    username: "REPLACE_WITH_DB_USERNAME"
+    password: "REPLACE_WITH_DB_PASSWORD"
+  jpa:
+    open-in-view: false
+    hibernate:
+      # validate（非 create/update）：只驗證 entity 與已存在 schema 是否一致，schema 本身
+      # 一律以 infra/sql/002_create_tables.sql（權威 DDL）為準，不讓 Hibernate 自動產生/修改。
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.SQLServerDialect
+        jdbc:
+          time_zone: UTC
 
 management:
   endpoints:
@@ -17,11 +44,15 @@ management:
       show-details: never
 
 # ---------------------------------------------------------------------------
-# 本專案自訂設定。目前 persistence 層為 in-memory 骨架（devops-engineer 建置
-# SQL Server 後，將 com.fido.server.repository.inmemory.* 換成 JPA/JDBC 實作，
-# 本設定檔可望不需大改）。
+# 本專案自訂設定。
 # ---------------------------------------------------------------------------
 fido:
+  persistence:
+    # jpa（預設，對齊 CLAUDE.md「獨立 SQL Server 實例」）：啟用
+    # com.fido.server.repository.jpa.*，實際連線的資料庫由上方 spring.datasource.* 決定。
+    # memory：啟用 com.fido.server.repository.inmemory.*（不建立任何 DataSource），僅供
+    # 本機開發/測試骨架使用，正式部署不應設為 memory。
+    mode: jpa
   challenge:
     ttl-seconds: 60           # 對齊 CLAUDE.md：Challenge 60 秒時效
   session-jwt:

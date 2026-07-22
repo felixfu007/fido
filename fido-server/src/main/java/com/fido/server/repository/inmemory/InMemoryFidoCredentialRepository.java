@@ -3,6 +3,7 @@ package com.fido.server.repository.inmemory;
 import com.fido.server.domain.FidoCredential;
 import com.fido.server.domain.enums.RecordStatus;
 import com.fido.server.repository.FidoCredentialRepository;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
 
 import java.util.Arrays;
@@ -15,6 +16,7 @@ import java.util.stream.Collectors;
 
 /** In-memory 骨架實作，見 {@link InMemoryTenantRepository} 說明。 */
 @Repository
+@ConditionalOnProperty(prefix = "fido.persistence", name = "mode", havingValue = "memory")
 public class InMemoryFidoCredentialRepository implements FidoCredentialRepository {
 
     private final Map<Long, FidoCredential> byPk = new ConcurrentHashMap<>();

@@ -2,6 +2,7 @@ package com.fido.server.repository.inmemory;
 
 import com.fido.server.domain.Tenant;
 import com.fido.server.repository.TenantRepository;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
 
 import java.util.Arrays;
@@ -16,6 +17,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 待 devops-engineer 建置 SQL Server 後，以 Spring Data JPA / JDBC 實作替換本類別。
  */
 @Repository
+@ConditionalOnProperty(prefix = "fido.persistence", name = "mode", havingValue = "memory")
 public class InMemoryTenantRepository implements TenantRepository {
 
     private final Map<Long, Tenant> byId = new ConcurrentHashMap<>();

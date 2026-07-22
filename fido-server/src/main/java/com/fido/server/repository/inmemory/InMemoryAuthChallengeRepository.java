@@ -2,6 +2,7 @@ package com.fido.server.repository.inmemory;
 
 import com.fido.server.domain.AuthChallenge;
 import com.fido.server.repository.AuthChallengeRepository;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
 
 import java.util.Map;
@@ -11,6 +12,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** In-memory 骨架實作，見 {@link InMemoryTenantRepository} 說明。 */
 @Repository
+@ConditionalOnProperty(prefix = "fido.persistence", name = "mode", havingValue = "memory")
 public class InMemoryAuthChallengeRepository implements AuthChallengeRepository {
 
     private final Map<String, AuthChallenge> byCeremonyId = new ConcurrentHashMap<>();

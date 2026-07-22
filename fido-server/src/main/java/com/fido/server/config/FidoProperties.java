@@ -14,6 +14,7 @@ public class FidoProperties {
     private RateLimit rateLimit = new RateLimit();
     private Attestation attestation = new Attestation();
     private DevSeed devSeed = new DevSeed();
+    private Persistence persistence = new Persistence();
 
     public Challenge getChallenge() {
         return challenge;
@@ -53,6 +54,14 @@ public class FidoProperties {
 
     public void setDevSeed(DevSeed devSeed) {
         this.devSeed = devSeed;
+    }
+
+    public Persistence getPersistence() {
+        return persistence;
+    }
+
+    public void setPersistence(Persistence persistence) {
+        this.persistence = persistence;
     }
 
     public static class Challenge {
@@ -210,6 +219,26 @@ public class FidoProperties {
 
         public void setApiKey(String apiKey) {
             this.apiKey = apiKey;
+        }
+    }
+
+    public static class Persistence {
+        /**
+         * {@code jpa}（預設，對齊 CLAUDE.md「獨立 SQL Server 實例」）：啟用
+         * {@code com.fido.server.repository.jpa.*}，實際連線的資料庫由
+         * {@code spring.datasource.*} 決定（正式環境應指向 SQL Server；本機開發可用
+         * H2 MSSQL 相容模式，見 {@code application-h2.yml}，僅存在於 test classpath）。
+         * <p>{@code memory}：啟用 {@code com.fido.server.repository.inmemory.*}，
+         * 完全不建立任何 DataSource，僅供本機開發/測試骨架使用，正式部署不應設為 memory。
+         */
+        private String mode = "jpa";
+
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
         }
     }
 }

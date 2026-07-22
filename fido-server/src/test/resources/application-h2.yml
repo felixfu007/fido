@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# Spring profile "h2"：本機開發／測試用資料庫（H2，MSSQL 相容模式），僅存在於
+# src/test/resources（test classpath），不會出現在正式部署的 classpath／jar 內。
+#
+# 疊加在 src/test/resources/application.yml（測試預設值，mode=memory）之上，只覆寫本檔
+# 列出的屬性；未列出的屬性（session-jwt/attestation/dev-seed 等）沿用測試預設值。
+#
+# 用法：測試類別加 @ActiveProfiles("h2") 即會套用本檔，把 fido.persistence.mode 切回 jpa
+# 並接上這個 H2 in-memory 資料庫（見 db/h2/schema-h2.sql 初始化腳本）。
+#
+# H2 URL 參數說明：
+#   - MODE=MSSQLServer：啟用 H2 的 SQL Server 相容模式（UNIQUEIDENTIFIER/NVARCHAR/VARBINARY/
+#     DATETIME2/IDENTITY(seed,increment) 等型別與語法別名）。注意 H2 2.x 這個模式的正式名稱是
+#     "MSSQLServer"，不是常見誤寫的 "MSSQL"（H2 org.h2.engine.Mode$ModeEnum 列舉值即為
+#     MSSQLServer；URL 內若寫成 MODE=MSSQL 會直接連線失敗：
+#     org.h2.jdbc.JdbcSQLNonTransientConnectionException: Unknown mode "MSSQL"）。
+#   - 刻意【不】加 DATABASE_TO_UPPER=false：實測發現加上這個參數後，Hibernate
+#     ddl-auto=validate 會對每一張表都回報 SchemaManagementException: missing table，即使
+#     schema-locations 腳本已經成功建表（用 H2 自己的 DatabaseMetaData.getTables() 查得到）。
+#     根本原因：DATABASE_TO_UPPER=false 只改變 H2「實際儲存」unquoted 識別字的大小寫（保留原樣
+#     小寫），但 Hibernate 的 identifier 正規化仍預期未加引號的識別字會被資料庫摺為大寫（ANSI SQL
+#     慣例，也是 H2 的預設行為），兩者對「同一個 unquoted 識別字最終該長什麼樣子」認知不一致，
+#     导致 ddl-auto=validate 拿 Hibernate 正規化後的大寫名稱去比對 H2 裡實際存在的小寫名稱，
+#     永遠比對不到。拿掉 DATABASE_TO_UPPER=false（改用 H2 預設值，unquoted 識別字一律摺為大寫）
+#     後，兩邊對 unquoted 識別字的大小寫規則就一致了，validate 才會通過。因此
+#     schema-h2.sql／entity 內雖然逐字寫小寫的表名/欄位名，但實際落地到 H2 時會被
+#     H2 摺成大寫儲存 —— 這只影響 catalog 內部儲存形式，不影響任何一行程式碼或 SQL
+#     （Hibernate 產生的 DML 也一律用它自己正規化後的大寫名稱，兩邊全程自動保持一致）。
+#   - DB_CLOSE_DELAY=-1：資料庫存活到 JVM 結束為止，避免連線池最後一個連線關閉時整個
+#     in-memory 資料庫被清空（測試過程中可能有多次借還連線）。
+#   - 資料庫名稱帶隨機亂數，讓每次測試執行都是全新、互不干擾的 in-memory 資料庫。
+# ---------------------------------------------------------------------------
+spring:
+  datasource:
+    url: "jdbc:h2:mem:fido_h2_test_${random.uuid};MODE=MSSQLServer;DB_CLOSE_DELAY=-1"
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  sql:
+    init:
+      mode: always
+      schema-locations: "classpath:db/h2/schema-h2.sql"
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    defer-datasource-initialization: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+
+fido:
+  persistence:
+    mode: jpa
