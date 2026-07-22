@@ -132,6 +132,9 @@ public class FidoProperties {
         @NestedConfigurationProperty
         private Stub stub = new Stub();
 
+        @NestedConfigurationProperty
+        private PocTrust pocTrust = new PocTrust();
+
         public String getMode() {
             return mode;
         }
@@ -146,6 +149,14 @@ public class FidoProperties {
 
         public void setStub(Stub stub) {
             this.stub = stub;
+        }
+
+        public PocTrust getPocTrust() {
+            return pocTrust;
+        }
+
+        public void setPocTrust(PocTrust pocTrust) {
+            this.pocTrust = pocTrust;
         }
 
         /**
@@ -170,6 +181,39 @@ public class FidoProperties {
 
             public void setDefaultSecurityLevel(String defaultSecurityLevel) {
                 this.defaultSecurityLevel = defaultSecurityLevel;
+            }
+        }
+
+        /**
+         * 【PoC 專用信任設定，與 {@link #mode} 完全獨立】{@code mode} 控制「要不要做真實密碼學
+         * 驗證」；本設定控制「除了內建 Google 官方 root 之外，要不要額外信任一組指定的測試
+         * root」——用於 Android 模擬器沒有真正 StrongBox/TEE、其 Key Attestation 憑證鏈只會
+         * 鏈到模擬器自產的測試 root（而非 Google root）的情境，讓 PoC 能在
+         * {@code fido.attestation.mode=real}（完整密碼學驗證，含 challenge 綁定與
+         * securityLevel 判讀）下走到「憑證鏈信任」這一步之後。
+         *
+         * <p><b>預設值 {@code enabled=false}</b>：不論任何 profile，只要沒有明確在設定檔或啟動
+         * 參數開啟，{@link com.fido.server.webauthn.TrustedRootCertificateStore} 的行為與此
+         * 設定新增之前完全一致（只信任內建 Google root），正式部署路徑不受影響。
+         */
+        public static class PocTrust {
+            private boolean enabled = false;
+            private String extraRootsLocation = "file:./poc-trust-roots/*.pem";
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public String getExtraRootsLocation() {
+                return extraRootsLocation;
+            }
+
+            public void setExtraRootsLocation(String extraRootsLocation) {
+                this.extraRootsLocation = extraRootsLocation;
             }
         }
     }

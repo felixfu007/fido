@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FIDO Authenticator (PoC)</string>
+    <string name="create_entry_label">使用此裝置的硬體金鑰註冊</string>
+    <string name="create_entry_description">FIDO Authenticator（StrongBox/TEE）</string>
+    <string name="get_entry_label">使用此裝置的 FIDO 金鑰登入</string>
+</resources>

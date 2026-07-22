@@ -71,6 +71,15 @@ fido:
     stub:
       chain-valid: true
       default-security-level: STRONG_BOX   # STRONG_BOX / TEE / SOFTWARE（設 SOFTWARE 可測試 422 HARDWARE_SECURITY_NOT_MET 分支）
+    # 【PoC 專用，與上面的 mode 完全獨立】mode 控制「要不要做真實密碼學驗證」；poc-trust
+    # 控制「除了內建 Google 官方 root，要不要額外信任一組指定路徑下的測試 root」。預設
+    # enabled=false：正式部署路徑不受影響，只信任內建 Google 官方 root。僅在 Android
+    # 模擬器等沒有真正硬體、其 Key Attestation 憑證鏈鏈到自產測試 root 的 PoC 情境才需要
+    # 開啟（見 docs/android-poc-checklist.md 附錄 A-3、CLAUDE.md）。extra-roots-location
+    # 預設指向 production classpath 之外的外部檔案路徑，避免 PoC 測試 root 被誤植入部署產物。
+    poc-trust:
+      enabled: false
+      extra-roots-location: "file:./poc-trust-roots/*.pem"
   dev-seed:
     enabled: true
     tenant-name: "Demo Shop"

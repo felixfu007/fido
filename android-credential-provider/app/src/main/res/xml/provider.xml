@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    宣告本 CredentialProviderService 支援的憑證類型能力。系統 Credential Manager 依此決定
+    是否在 createCredential()/getCredential() 流程中詢問本 provider（見
+    AndroidManifest.xml 內 service 的 <meta-data name="android.credentials.provider">）。
+    本 PoC 僅實作公鑰憑證（WebAuthn/passkey），不宣告密碼類型能力。
+-->
+<!--
+    注意：capability name 必須是 "androidx.credentials.TYPE_PUBLIC_KEY_CREDENTIAL"
+    （androidx 前綴），不是 "android.credentials.TYPE_PUBLIC_KEY_CREDENTIAL"。這是實測發現的
+    坑：兩者字串接近，容易寫錯；寫錯時系統不會報錯或警告——只會在
+    CredManSysServiceImpl 的 logcat 留下不易發現的
+    "Service does not have the required capabilities"，接著整個 create 流程悄悄退回系統內建
+    的 hybrid/QR remote 選項，provider 的 onBeginCreateCredentialRequest 完全不會被呼叫，
+    表面上看起來像是「provider 沒被系統採用」而非「capability 字串打錯」，容易誤判。
+    參考來源：Google 官方 identity-samples/CredentialProvider/MyVault 範例
+    （res/xml/provider.xml）。
+-->
+<credential-provider xmlns:android="http://schemas.android.com/apk/res/android">
+    <capabilities>
+        <capability name="androidx.credentials.TYPE_PUBLIC_KEY_CREDENTIAL" />
+    </capabilities>
+</credential-provider>

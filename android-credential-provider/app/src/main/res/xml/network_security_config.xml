@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    【PoC 專用】允許模擬器連到本機 fido-server（10.0.2.2 是 Android 模擬器存取宿主機
+    localhost 的慣例位址，見任務背景）。fido-server 骨架目前未設定 server.ssl.*（見
+    fido-server/src/main/resources/application.yml，無 server.ssl 區塊），實際是明文 HTTP，
+    儘管 api-contract.md 要求正式環境「TLS 強制」——這是 PoC 環境與正式部署路徑的落差，
+    已在回報中列為待確認事項，不在本設定檔片面補足伺服器端 TLS。
+    Android 14 預設封鎖明文流量（targetSdk>=28），故需以下設定明確放行僅限
+    10.0.2.2（模擬器）與 localhost 這兩個 PoC 開發位址；不放行任意網域。
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

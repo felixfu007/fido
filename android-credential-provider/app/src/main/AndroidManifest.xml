@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 對齊 CLAUDE.md：僅 Android 14+（API 34），故不需相容舊版硬體/CredentialManager 缺失的 fallback。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.FidoCredentialProvider"
+        android:networkSecurityConfig="@xml/network_security_config">
+
+        <!--
+            核心元件：自訂 CredentialProviderService（對齊 CLAUDE.md「自訂 Android
+            CredentialProviderService，掛載於系統 Credential Manager」）。
+
+            - action "android.service.credentials.CredentialProviderService"：系統用來探索本
+              APP 是否為可用的憑證提供者。
+            - permission "android.permission.BIND_CREDENTIAL_PROVIDER_SERVICE"：Android 14
+              強制要求，避免非系統元件任意綁定此 service。
+            - <meta-data name="android.credentials.provider">：宣告本 provider 支援的憑證類型
+              能力（見 res/xml/provider.xml），系統據此決定是否在 Credential Manager 流程中
+              詢問本 provider。
+        -->
+        <service
+            android:name=".FidoCredentialProviderService"
+            android:label="@string/app_name"
+            android:icon="@mipmap/ic_launcher"
+            android:exported="true"
+            android:permission="android.permission.BIND_CREDENTIAL_PROVIDER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.credentials.CredentialProviderService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.credentials.provider"
+                android:resource="@xml/provider" />
+        </service>
+
+        <!--
+            由 CredentialProviderService 的 CreateEntry / CredentialEntry PendingIntent 呼叫，
+            實際執行 Keystore 金鑰產生 / attestationObject 組裝，或 assertion 簽章。
+            採用 Dialog 風格主題（見 styles.xml），呈現為系統 Credential Manager ceremony 的
+            延續而非獨立 APP 全螢幕接管（對齊清單項目 1 通過判準第 3 點）。
+        -->
+        <activity
+            android:name=".ui.CreatePasskeyActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FidoCredentialProvider.Dialog"
+            android:excludeFromRecents="true" />
+
+        <activity
+            android:name=".ui.GetPasskeyActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FidoCredentialProvider.Dialog"
+            android:excludeFromRecents="true" />
+
+        <!--
+            【PoC 專用測試 harness，非產品程式碼】模擬「購物網站前端 + 後端」，觸發
+            CredentialManager.createCredential()/getCredential()，並直接呼叫 fido-server REST
+            端點（真實產品中 App 不會這麼做，見 api-contract.md 前言與
+            docs/android-poc-checklist.md 附錄 A-2）。
+        -->
+        <activity
+            android:name=".harness.HarnessActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FidoCredentialProvider">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FidoCredentialProvider" parent="Theme.MaterialComponents.DayNight.NoActionBar" />
+
+    <!--
+        CreatePasskeyActivity / GetPasskeyActivity 使用的 Dialog 風格主題：讓這兩個 Activity
+        以類似對話框的樣式呈現，作為系統 Credential Manager bottom sheet 選擇 entry 後的
+        ceremony 延續（產金鑰 / 簽章的實際動作必須在 App 自己的 Activity 內執行），而非切換到
+        看起來像獨立 APP 的全螢幕畫面（對齊清單項目 1 通過判準第 3 點的精神）。
+    -->
+    <style name="Theme.FidoCredentialProvider.Dialog" parent="Theme.MaterialComponents.DayNight.Dialog">
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+    </style>
+</resources>
