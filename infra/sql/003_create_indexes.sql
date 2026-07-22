@@ -57,5 +57,10 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_audit_tenant_type_tim
     CREATE INDEX IX_audit_tenant_type_time ON dbo.audit_log (tenant_id, event_type, created_at);
 GO
 
+-- tenant_app_bindings（db-schema.md 第 9 節 / DB17）
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_appbind_tenant_status' AND object_id = OBJECT_ID(N'dbo.tenant_app_bindings'))
+    CREATE INDEX IX_appbind_tenant_status ON dbo.tenant_app_bindings (tenant_id, status);
+GO
+
 PRINT N'003_create_indexes.sql 執行完成：次要索引已建立/確認存在。';
 GO

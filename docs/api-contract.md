@@ -58,6 +58,10 @@
   | `X-Request-Id` | 否 | 呼叫端自帶的追蹤 ID；伺服器會原樣回填至錯誤回應的 `traceId` 並寫入 `audit_log`。未帶則由伺服器產生。 |
 
 - **RP ID 綁定**：`rp_id` 一律由伺服器依租戶查表決定（= 購物網站網域），呼叫端不得在 request 指定 RP ID；若前端送回的 `clientDataJSON` / attestation 中的 RP ID hash 與租戶 `rp_id` 不符 → `403 RP_ID_MISMATCH`。
+- **Origin 綁定** **【本文件補充決策 D12】**（詳見 `docs/origin-binding.md`）：伺服器另比對 `clientDataJSON.origin` 是否在該租戶的允許 origin 清單。origin 有兩種合法形態，皆比對同一份租戶允許清單：
+  - **Web origin**（瀏覽器情境，v1 基準）：如 `https://shop.example.com`，來源為 `tenants.expected_origin`。
+  - **App origin**（原生 App 情境，opt-in）：`android:apk-key-hash:<base64url>`，來源為 `tenant_app_bindings` 表 active 列的 `apk_key_hash_origin`（租戶完成 Digital Asset Links onboarding 後由平台登錄）。純瀏覽器租戶不需登錄任何 App binding。
+  - origin 不在允許清單 → `403 ORIGIN_NOT_ALLOWED`（與 RP ID 不符的 `RP_ID_MISMATCH` 區分，便於購物網站分辨錯因）。
 - 缺少或無效 API Key → `401 UNAUTHENTICATED`。API Key 對應租戶被停用 → `403 TENANT_DISABLED`。
 - **【本文件補充決策 D3】** 全域速率限制：每租戶預設 100 TPS（對齊 CLAUDE.md 峰值容量目標），超過回 `429 RATE_LIMITED`，帶 `Retry-After` header。
 
@@ -114,6 +118,7 @@
 | 403 | `TENANT_MISMATCH` | `X-Tenant-Id` 與 API Key 不符 |
 | 403 | `TENANT_DISABLED` | 租戶停用 |
 | 403 | `RP_ID_MISMATCH` | RP ID hash 與租戶 `rp_id` 不符 |
+| 403 | `ORIGIN_NOT_ALLOWED` | `clientDataJSON.origin` 不在租戶允許清單（web origin 於 `tenants.expected_origin`；app origin `android:apk-key-hash:...` 於 `tenant_app_bindings`）。**【D12】** 見 §1.2 Origin 綁定與 `docs/origin-binding.md` |
 | 404 | `NOT_FOUND` | 路由 / 資源路徑不存在（例：未知端點）。**注意：使用者或裝置「存在與否」一律不以 404 表達**，見 D7 防列舉策略。 |
 | 409 | `CREDENTIAL_ALREADY_EXISTS` | 同一 credential 已註冊 |
 | 422 | `ATTESTATION_INVALID` | attestation 物件解析 / 簽章失敗 |
@@ -210,7 +215,7 @@
 **伺服器驗證步驟（合約語意）**
 
 1. 依 `ceremonyId` 取 `auth_challenges`；不存在 → `400 CHALLENGE_NOT_FOUND`；已過 `expires_at` 或已消費 → `400 CHALLENGE_EXPIRED`（前端須依 CLAUDE.md「逾時自動重新申請」重跑 2.1）。
-2. 標準 WebAuthn attestation 驗證：`clientDataJSON.type=webauthn.create`、challenge 相符、origin/RP ID hash 相符（不符 → `403 RP_ID_MISMATCH`）。
+2. 標準 WebAuthn attestation 驗證：`clientDataJSON.type=webauthn.create`、challenge 相符、RP ID hash 與租戶 `rp_id` 相符（不符 → `403 RP_ID_MISMATCH`）、`clientDataJSON.origin` 在租戶允許清單（不符 → `403 ORIGIN_NOT_ALLOWED`；允許清單含 web origin 與 `tenant_app_bindings` 的 app origin，見 §1.2 / `docs/origin-binding.md`）。
 3. **Android Key Attestation 憑證鏈驗證**：解析 attestation 憑證鏈至 Google 硬體 attestation root，驗證有效性與撤銷狀態；失敗 → `422 ATTESTATION_CHAIN_INVALID`。
 4. **TEE/StrongBox 檢核**：檢查 attestation extension 的 `securityLevel`；未達 `TRUSTED_ENVIRONMENT`（TEE）或 `STRONG_BOX` → `422 HARDWARE_SECURITY_NOT_MET`，**拒絕註冊**（對齊 CLAUDE.md 強制硬體安全區）。`details` 內回傳實際偵測到的 level 供客服判讀。
 5. 若該 credential 已存在 → `409 CREDENTIAL_ALREADY_EXISTS`。
@@ -232,9 +237,9 @@
 }
 ```
 
-**主要錯誤**：`400 CHALLENGE_EXPIRED/CHALLENGE_NOT_FOUND/VALIDATION_ERROR`、`403 RP_ID_MISMATCH`、`422 ATTESTATION_INVALID/ATTESTATION_CHAIN_INVALID/HARDWARE_SECURITY_NOT_MET`、`409 CREDENTIAL_ALREADY_EXISTS`。
+**主要錯誤**：`400 CHALLENGE_EXPIRED/CHALLENGE_NOT_FOUND/VALIDATION_ERROR`、`403 RP_ID_MISMATCH/ORIGIN_NOT_ALLOWED`、`422 ATTESTATION_INVALID/ATTESTATION_CHAIN_INVALID/HARDWARE_SECURITY_NOT_MET`、`409 CREDENTIAL_ALREADY_EXISTS`。
 
-**核心表對應**：讀/消費 `auth_challenges`；insert `fido_credentials`（credential_id, public_key, sign_count=0, aaguid, transports, status=`ACTIVE`）；insert `bound_devices`（device_name, model, os_version, security_level, attestation 摘要）；`audit_log` 記 `REG_SUCCESS` 或失敗原因。
+**核心表對應**：讀/消費 `auth_challenges`；讀 `tenant_app_bindings`（若 origin 為 app origin，比對其 `apk_key_hash_origin`）；insert `fido_credentials`（credential_id, public_key, sign_count=0, aaguid, transports, status=`ACTIVE`）；insert `bound_devices`（device_name, model, os_version, security_level, attestation 摘要）；`audit_log` 記 `REG_SUCCESS` 或失敗原因，`detail` 內記本次 ceremony 的 origin 來源型別（`originType` = `WEB` / `NATIVE_APP`，**【本文件補充決策 D13】**，用既有 JSON `detail` 欄位、無 schema 變更）。
 
 ---
 
@@ -293,7 +298,7 @@
 
 1. 依 `ceremonyId` 取 challenge；過期/不存在 → `400 CHALLENGE_EXPIRED / CHALLENGE_NOT_FOUND`。
 2. 以 credential id 查 `fido_credentials`；查無 → `422 ASSERTION_INVALID`；狀態非 ACTIVE → `422 CREDENTIAL_REVOKED`。
-3. 標準 assertion 驗證：`clientDataJSON.type=webauthn.get`、challenge 相符、RP ID hash 相符（不符 → `403 RP_ID_MISMATCH`）、UV flag 為真、以儲存的 public key 驗 signature；失敗 → `422 ASSERTION_INVALID`。
+3. 標準 assertion 驗證：`clientDataJSON.type=webauthn.get`、challenge 相符、RP ID hash 相符（不符 → `403 RP_ID_MISMATCH`）、`clientDataJSON.origin` 在租戶允許清單（不符 → `403 ORIGIN_NOT_ALLOWED`，見 §1.2 / `docs/origin-binding.md`）、UV flag 為真、以儲存的 public key 驗 signature；失敗 → `422 ASSERTION_INVALID`。
 4. **Sign counter 檢查（含自動撤銷）**：取 `authenticatorData` 的 counter 與 `fido_credentials.sign_count` 比較：
    - `new > stored` → 正常，更新 `sign_count = new`。
    - `new == 0 && stored == 0` → 視為該 authenticator 不提供計數，放行不更新（合約允許）。
@@ -316,9 +321,9 @@
 }
 ```
 
-**主要錯誤**：`400 CHALLENGE_EXPIRED/CHALLENGE_NOT_FOUND`、`403 RP_ID_MISMATCH`、`422 ASSERTION_INVALID/CREDENTIAL_REVOKED/SIGN_COUNTER_REGRESSION`。
+**主要錯誤**：`400 CHALLENGE_EXPIRED/CHALLENGE_NOT_FOUND`、`403 RP_ID_MISMATCH/ORIGIN_NOT_ALLOWED`、`422 ASSERTION_INVALID/CREDENTIAL_REVOKED/SIGN_COUNTER_REGRESSION`。
 
-**核心表對應**：讀/消費 `auth_challenges`；讀/更新 `fido_credentials`（sign_count、status）；更新 `bound_devices`（last_used_at，或撤銷時 status）；`audit_log` 記 `AUTH_SUCCESS` / `AUTO_REVOKE_COUNTER_REGRESSION` / `AUTH_FAIL`。JWT 不落庫（短效），僅 `jti` 可選記於 audit。
+**核心表對應**：讀/消費 `auth_challenges`；讀 `tenant_app_bindings`（若 origin 為 app origin）；讀/更新 `fido_credentials`（sign_count、status）；更新 `bound_devices`（last_used_at，或撤銷時 status）；`audit_log` 記 `AUTH_SUCCESS` / `AUTO_REVOKE_COUNTER_REGRESSION` / `AUTH_FAIL`，`detail` 內記本次 origin 來源型別（`originType` = `WEB` / `NATIVE_APP`，**【D13】**）。JWT 不落庫（短效），僅 `jti` 可選記於 audit。
 
 ---
 
@@ -457,14 +462,25 @@
 
 ---
 
+### 5.3 租戶已授權 App 清單（原生 App 情境，v1 無 API 端點）
+
+**【本文件補充決策 D14】** 原生 App 情境（`docs/origin-binding.md` OB1）需要「租戶授權哪些原生 App（package + 簽章指紋）代表其網域」的資料，存於 `tenant_app_bindings` 表。經評估，**v1 不新增任何 REST 端點**管理此清單，理由：
+
+1. **登錄流程 v1 採人工 onboarding**（origin-binding.md OB6）：租戶完成 `assetlinks.json` 部署後，把 App package + SHA-256 簽章指紋交給平台營運方，由營運方直接寫入 `tenant_app_bindings`（與「租戶開通、發放 API Key」同屬人工 onboarding 步驟）。中小規模、一租戶通常一支 App，人工足夠。
+2. **不影響 ceremony 驗證正確性**：伺服器在 §2.2 / §3.2 驗證 origin 時，直接讀 `tenant_app_bindings` 比對，無需呼叫端提供任何額外欄位，故現有 ceremony 端點無需改動請求/回應結構。
+
+日後若原生 App 租戶增多、需自助管理，再評估新增（唯讀查詢 `GET .../tenant/app-bindings` 或設定端點）；此擴充與時程列 origin-binding.md OB6，非 v1 範圍。屆時 `tenant_app_bindings.binding_uid` 即為對外識別（db-schema.md DB17 已預留）。
+
+---
+
 ## 6. 端點與核心表對應總表
 
 | # | Method | Path | 主要讀寫的表 |
 |---|---|---|---|
 | 2.1 | POST | `/api/v1/registration/options` | R `tenants`；U `fido_user_ref`；C `auth_challenges`；C `audit_log` |
-| 2.2 | POST | `/api/v1/registration/result` | RU `auth_challenges`；C `fido_credentials`,`bound_devices`；C `audit_log` |
+| 2.2 | POST | `/api/v1/registration/result` | RU `auth_challenges`；R `tenant_app_bindings`(origin 為 app origin 時)；C `fido_credentials`,`bound_devices`；C `audit_log` |
 | 3.1 | POST | `/api/v1/authentication/options` | R `fido_user_ref`,`fido_credentials`；C `auth_challenges`；C `audit_log` |
-| 3.2 | POST | `/api/v1/authentication/result` | RU `auth_challenges`,`fido_credentials`,`bound_devices`；C `audit_log` |
+| 3.2 | POST | `/api/v1/authentication/result` | RU `auth_challenges`,`fido_credentials`,`bound_devices`；R `tenant_app_bindings`(origin 為 app origin 時)；C `audit_log` |
 | 3.3 | GET | `/api/v1/.well-known/jwks.json` | （伺服器金鑰設定，無表） |
 | 4.1 | GET | `/api/v1/users/{externalUserId}/devices` | R `fido_user_ref`,`bound_devices`,`fido_credentials` |
 | 4.2 | DELETE | `/api/v1/users/{externalUserId}/devices/{deviceId}` | U `bound_devices`,`fido_credentials`；C `audit_log` |
@@ -492,6 +508,9 @@ R=讀 C=新增 U=更新。所有查詢皆隱含以 API Key 對應租戶作 `tena
 | D9 | 列表端點分頁：`limit` 預設 50 / 最大 100，游標式 `cursor` | 保守分頁 |
 | D10 | 裝置撤銷採軟刪除（status=REVOKED，不實體刪列） | 保留 1 年稽核 |
 | D11 | 新增 5.2 稽核事件唯讀查詢（第一版可延後實作） | 支援客服人工帳號救援後盾 |
+| D12 | Origin 綁定：`clientDataJSON.origin` 比對租戶允許清單（web origin 於 `tenants.expected_origin`、app origin 於 `tenant_app_bindings`）；不符回 `403 ORIGIN_NOT_ALLOWED`（與 `RP_ID_MISMATCH` 區分） | 對齊 origin-binding.md OB1/OB4，人類已拍板；防釣魚並支援原生 App opt-in |
+| D13 | `registration/result` / `authentication/result` 於 `audit_log.detail` 記 `originType`(`WEB`/`NATIVE_APP`) | origin-binding.md OB5，人類已拍板；事後鑑識登入來源，用既有 JSON 欄位無 schema 變更 |
+| D14 | 租戶 App 授權清單 v1 不新增 REST 端點，採人工 onboarding 寫 `tenant_app_bindings` | origin-binding.md OB6，人類已拍板；中小規模人工足夠、不影響 ceremony 驗證 |
 | D-附 | 允許使用者撤銷至 0 個 FIDO 裝置（回退純帳密） | 對齊帳密永久保留、FIDO 為加掛選項 |
 
-> 複核通過後，建議將 D2/D3/D4/D5/D10 等影響架構的項目回填至 CLAUDE.md「已確認的關鍵架構決策」表，並將本合約交接 dev-engineer 進入實作。
+> 複核通過後，建議將 D2/D3/D4/D5/D10 等影響架構的項目回填至 CLAUDE.md「已確認的關鍵架構決策」表，並將本合約交接 dev-engineer 進入實作。D12/D13/D14 已由人類拍板（origin-binding.md OB1/OB4/OB5/OB6），對應 `tenant_app_bindings` 表已定案於 db-schema.md 第 9 節。

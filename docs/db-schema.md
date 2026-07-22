@@ -6,7 +6,9 @@
 - 對齊文件：`d:\fido\docs\api-contract.md`、`d:\fido\CLAUDE.md`
 - 讀者：dev-engineer（JPA/實體對應）、devops-engineer（建庫、索引、備份、清理排程）
 
-> 本文件是六張核心表的**權威 schema**。欄位命名與型別以此為準，dev / devops 請勿自行臆測。凡標記 **【本文件補充決策 DBn】** 者為 CLAUDE.md / API 合約未明確涵蓋、由本文件先行決定、待人工複核回填的細節，清單見文末附錄 B。
+> 本文件是七張核心表的**權威 schema**。欄位命名與型別以此為準，dev / devops 請勿自行臆測。凡標記 **【本文件補充決策 DBn】** 者為 CLAUDE.md / API 合約未明確涵蓋、由本文件先行決定、待人工複核回填的細節，清單見文末附錄 B。
+>
+> 第七張表 `tenant_app_bindings`（原生 App 情境的 Digital Asset Links 授權登錄）為 origin 綁定架構定案（`docs/origin-binding.md` OB1/OB3）後新增，早期六張表的敘述已一併更新為七張。
 
 ---
 
@@ -20,9 +22,10 @@
 6. [`bound_devices`](#6-bound_devices)
 7. [`auth_challenges`](#7-auth_challenges)
 8. [`audit_log`](#8-audit_log)
-9. [索引與外鍵總表](#9-索引與外鍵總表)
-10. [資料保留與清理排程](#10-資料保留與清理排程)
-11. [附錄 B：本文件補充決策清單](#附錄-b本文件補充決策清單)
+9. [`tenant_app_bindings`](#9-tenant_app_bindings)
+10. [索引與外鍵總表](#10-索引與外鍵總表)
+11. [資料保留與清理排程](#11-資料保留與清理排程)
+12. [附錄 B：本文件補充決策清單](#附錄-b本文件補充決策清單)
 
 ---
 
@@ -48,10 +51,12 @@ tenants (1) ──< fido_user_ref (1) ──< fido_credentials (1) ──(1:1)�
    │                   │                      │
    │                   │                      └──< (被 auth_challenges 於驗證時參照)
    ├──< auth_challenges (challenge 綁定租戶，登入前可能尚未綁定 user_ref)
-   └──< audit_log (所有事件，含 pre-auth 失敗，tenant/user 可為 NULL)
+   ├──< audit_log (所有事件，含 pre-auth 失敗，tenant/user 可為 NULL)
+   └──< tenant_app_bindings (原生 App 情境：租戶授權的 Android App 簽章指紋)
 ```
 
 - `tenants 1 : N fido_user_ref`：一個購物網站租戶下多個使用者參照。
+- `tenants 1 : N tenant_app_bindings`：一個租戶可授權多支原生 App（正式/測試簽章、多 App）代表其網域發起 WebAuthn（見 `docs/origin-binding.md` 第 5 節）。僅原生 App 情境（opt-in）的租戶會有此列；純瀏覽器租戶此表無列。
 - `fido_user_ref 1 : N fido_credentials`：一使用者可註冊多台裝置 → 多把憑證（對齊「多裝置」決策）。
 - `fido_credentials 1 : 1 bound_devices` **【DB14】**：v1 情境 A 每次註冊在一台裝置產生一把 platform 憑證，故一憑證對一裝置。日後若同裝置多憑證再改 1:N。
 - `auth_challenges`：短生命週期，綁租戶；註冊時綁 `user_ref`，登入（usernameless）時 `user_ref_id` 可為 NULL，於驗證成功後由 credential 反查。
@@ -365,7 +370,60 @@ CREATE INDEX IX_audit_tenant_type_time ON dbo.audit_log (tenant_id, event_type, 
 
 ---
 
-## 9. 索引與外鍵總表
+## 9. `tenant_app_bindings`
+
+原生 App 情境（`docs/origin-binding.md` OB1）下，租戶授權「代表其網域發起 WebAuthn」的 Android App 簽章指紋登錄。**僅 opt-in 啟用原生 App 登入的租戶會有此表資料；純瀏覽器情境不需要任何列。** 此表是伺服器把 `android:apk-key-hash:...` app origin 納入該租戶 origin 允許清單的**權威來源與管理/稽核依據**。
+
+> App 簽章指紋是**租戶層**屬性（同一支 App、全租戶使用者共用同一簽章），與「使用者持有哪台裝置」正交，故置於本表而非 `bound_devices`（見 `docs/origin-binding.md` 第 5.4 節）。
+
+| 欄位 | 型別 | Null | 預設 | 說明 |
+|---|---|---|---|---|
+| `app_binding_pk` | BIGINT IDENTITY | 否 | | 內部 PK |
+| `binding_uid` | UNIQUEIDENTIFIER | 否 | NEWID() | 對外不透明識別；**【DB17】** 供日後租戶管理 API 使用，v1 尚未經 API 暴露（對齊 origin-binding.md OB6 人工 onboarding） |
+| `tenant_id` | BIGINT | 否 | | FK → tenants |
+| `package_name` | NVARCHAR(255) | 否 | | Android App 的 applicationId，如 `com.shop.example` |
+| `sha256_cert_fingerprint` | VARBINARY(32) | 否 | | App 簽章憑證 DER 的 SHA-256 原始位元組（對齊 DB6：二進位存 raw）。即 `assetlinks.json` 內 `sha256_cert_fingerprints` 的同一份雜湊 |
+| `apk_key_hash_origin` | NVARCHAR(120) | 否 | | 由上者換算的 WebAuthn app origin，`android:apk-key-hash:<base64url(fingerprint)>`；**伺服器 origin 允許清單即比對此值**，冗餘保存以利直接比對與管理顯示 |
+| `label` | NVARCHAR(100) | 是 | | 人類可讀標籤，如「正式版 App」「測試簽章」 |
+| `status` | NVARCHAR(20) | 否 | 'ACTIVE' | CHECK IN ('ACTIVE','REVOKED')，軟刪除（對齊 DB10），支援 App 簽章輪替不實體刪列 |
+| `revoked_at` | DATETIME2(3) | 是 | | 撤銷時間 |
+| `revoked_reason` | NVARCHAR(50) | 是 | | CHECK IN ('ADMIN','KEY_ROTATION','SECURITY') |
+| `created_at` | DATETIME2(3) | 否 | SYSUTCDATETIME() | |
+| `updated_at` | DATETIME2(3) | 否 | SYSUTCDATETIME() | |
+
+**鍵/索引**：PK `app_binding_pk`；UNIQUE `binding_uid`；UNIQUE (`tenant_id`,`package_name`,`sha256_cert_fingerprint`)（同一租戶同 App 同指紋不重複登錄）；INDEX (`tenant_id`,`status`)（列出租戶 active 授權）。
+
+**【DB17】** 新增本表（origin-binding.md OB3 選項 B）而非在 `tenants` 加 JSON 欄位（OB3 選項 A，已評估未採用）。理由：可逐筆稽核 App 授權的增刪與輪替、支援一租戶多 App、指紋可建唯一索引防重複；代價是核心表由六張增為七張，已回填 CLAUDE.md 與本文件。伺服器載入租戶時，可將本表 active 列的 `apk_key_hash_origin` 併入 `tenants.expected_origin` 允許清單一起比對（`expected_origin` 仍保留 web origin；app origin 以本表為權威來源）。
+
+**API / 服務對應**：無 v1 REST 端點（origin-binding.md OB6：登錄由人工 onboarding，非自助 API）；`authentication/result` / `registration/result` 驗證 origin 時，若 `clientDataJSON.origin` 為 app origin，比對本表 active 列的 `apk_key_hash_origin`。管理介面/客服可讀本表顯示租戶已授權的 App。
+
+```sql
+CREATE TABLE dbo.tenant_app_bindings (
+    app_binding_pk          BIGINT IDENTITY(1,1) NOT NULL,
+    binding_uid             UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_appbind_uid DEFAULT NEWID(),
+    tenant_id               BIGINT NOT NULL,
+    package_name            NVARCHAR(255) NOT NULL,
+    sha256_cert_fingerprint VARBINARY(32) NOT NULL,
+    apk_key_hash_origin     NVARCHAR(120) NOT NULL,
+    label                   NVARCHAR(100) NULL,
+    status                  NVARCHAR(20) NOT NULL CONSTRAINT DF_appbind_status DEFAULT 'ACTIVE',
+    revoked_at              DATETIME2(3) NULL,
+    revoked_reason          NVARCHAR(50) NULL,
+    created_at              DATETIME2(3) NOT NULL CONSTRAINT DF_appbind_created DEFAULT SYSUTCDATETIME(),
+    updated_at              DATETIME2(3) NOT NULL CONSTRAINT DF_appbind_updated DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_tenant_app_bindings PRIMARY KEY (app_binding_pk),
+    CONSTRAINT UQ_appbind_uid UNIQUE (binding_uid),
+    CONSTRAINT UQ_appbind_tenant_pkg_fp UNIQUE (tenant_id, package_name, sha256_cert_fingerprint),
+    CONSTRAINT FK_appbind_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT CK_appbind_status CHECK (status IN ('ACTIVE','REVOKED')),
+    CONSTRAINT CK_appbind_revreason CHECK (revoked_reason IN ('ADMIN','KEY_ROTATION','SECURITY'))
+);
+CREATE INDEX IX_appbind_tenant_status ON dbo.tenant_app_bindings (tenant_id, status);
+```
+
+---
+
+## 10. 索引與外鍵總表
 
 | 表 | PK | UNIQUE | 其他索引 | FK |
 |---|---|---|---|---|
@@ -375,13 +433,15 @@ CREATE INDEX IX_audit_tenant_type_time ON dbo.audit_log (tenant_id, event_type, 
 | bound_devices | device_pk | device_id, credential_pk | (user_ref_id,status), (tenant_id,status) | credential_pk→fido_credentials, user_ref_id→fido_user_ref, tenant_id→tenants |
 | auth_challenges | challenge_pk | ceremony_id | expires_at, (tenant_id,status) | tenant_id→tenants, user_ref_id→fido_user_ref |
 | audit_log | audit_id | — | (tenant_id,user_ref_id,created_at), created_at, (tenant_id,event_type,created_at) | tenant_id→tenants, user_ref_id→fido_user_ref |
+| tenant_app_bindings | app_binding_pk | binding_uid, (tenant_id,package_name,sha256_cert_fingerprint) | (tenant_id,status) | tenant_id→tenants |
 
 ---
 
-## 10. 資料保留與清理排程
+## 11. 資料保留與清理排程
 
 - **【DB11】** `auth_challenges`：challenge 為一次性短生命週期。建議 SQL Agent Job 每分鐘將 `expires_at < now` 的 PENDING 標為 EXPIRED，並每日刪除 `created_at < now-1天` 的列（保留少量供近期除錯即可，非稽核來源）。
 - **【DB12】** `audit_log`：保留 1 年（對齊 CLAUDE.md）。建議按月做資料分割（partition by `created_at` 月份）或 SQL Agent Job 每日刪除 `created_at < now-365天`。若採 partition，可用 SWITCH + DROP 高效清理。
+- `tenant_app_bindings`：**組態性資料，無自動清理**。與 `tenants` 同生命週期，撤銷採軟刪除（`status='REVOKED'`）長期保留供稽核；僅隨租戶整體下線時一併人工處理。
 - TDE 全庫加密與定期備份由 devops-engineer 依 CLAUDE.md 設定，不在本 schema 文件內展開。
 
 ---
@@ -406,5 +466,6 @@ CREATE INDEX IX_audit_tenant_type_time ON dbo.audit_log (tenant_id, event_type, 
 | DB14 | `fido_credentials` : `bound_devices` = 1:1（v1） | 情境 A 每次註冊一裝置一憑證；日後可放寬 |
 | DB15 | 單一資料庫單一 `dbo` schema，多租戶以 `tenant_id` 邏輯隔離 | 中小規模、運維簡單；非每租戶一 schema |
 | DB16 | `audit_log.device_pk` 不設硬 FK | 避免清理/軟刪動作被稽核列連動限制 |
+| DB17 | 新增第七張表 `tenant_app_bindings` 存租戶授權 App 簽章指紋（origin-binding.md OB3 選項 B，已拍板；未採選項 A 的 `tenants` JSON 欄位） | 可逐筆稽核/輪替 App 授權、支援一租戶多 App、指紋建唯一索引防重複；已回填 CLAUDE.md 六張→七張 |
 
-> 待複核項：DB2（API Key 雜湊儲存）、DB14（1:1 憑證裝置關係）、DB15（單 schema 邏輯隔離）屬會影響實作與運維的取捨，建議優先確認。複核通過後交接 dev-engineer（JPA 實體）與 devops-engineer（建庫腳本、索引、清理 Job、TDE/備份）。
+> 待複核項：DB2（API Key 雜湊儲存）、DB14（1:1 憑證裝置關係）、DB15（單 schema 邏輯隔離）屬會影響實作與運維的取捨，建議優先確認。DB17 已由人類拍板（OB3 選項 B）。複核通過後交接 dev-engineer（JPA 實體，含新 `tenant_app_bindings` 實體）與 devops-engineer（建庫腳本、索引、清理 Job、TDE/備份，並重新在 LocalDB 驗證含第七張表的 schema 建置）。

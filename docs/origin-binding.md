@@ -1,15 +1,15 @@
 # WebAuthn Origin 綁定架構 — 瀏覽器 vs 原生 App
 
-- 版本：v1（草案，待人工複核）
+- 版本：v2（OB1–OB6 已由人類拍板定案）
 - 最後更新：2026-07-22
 - 適用架構情境：A（標準 WebAuthn，同裝置）
 - 對齊文件：`d:\fido\CLAUDE.md`、`d:\fido\docs\api-contract.md`、`d:\fido\docs\db-schema.md`、`d:\fido\docs\android-poc-checklist.md`
-- 讀者：人類決策者（範圍拍板）、dev-engineer（provider / server 實作）、devops-engineer（租戶 onboarding）
-- 觸發來源：Android Credential Provider PoC 收尾時發現的開放問題（見 CLAUDE.md「目前階段」末段、`PocConfig.kt` Javadoc）
+- 讀者：dev-engineer（provider / server 實作）、devops-engineer（租戶 onboarding、schema）、qa-engineer
+- 觸發來源：Android Credential Provider PoC 收尾時發現的開放問題（見 CLAUDE.md「目前階段」、`PocConfig.kt` Javadoc）
 
 > 本文件把「WebAuthn ceremony 的 origin 綁定，在多租戶平台下如何安全傳遞」定案為設計。
 >
-> 凡標記 **【本文件補充決策 OBn，待人類確認】** 者，為 CLAUDE.md / 既有合約尚未涵蓋、由本文件先行提出、**尚未拍板**的架構決策，集中列於[第 8 節](#8-本文件補充決策清單待人類確認)。本文件不片面改寫 CLAUDE.md。凡標記 **【待人類確認：範圍】** 者，是需要人類明確回答才能定案的範圍問題，本文件只給建議與理由。
+> **本文件原列 OB1–OB6 六項待確認決策，已於 2026-07-22 由人類全數拍板**（結論見[第 8 節](#8-補充決策定案清單ob1ob6)）。已據此回填 `CLAUDE.md`（六→七張核心表、架構情境 A 補存取情境）、`db-schema.md`（新增 `tenant_app_bindings` 表 / DB17）、`api-contract.md`（`ORIGIN_NOT_ALLOWED` 錯誤碼 D12、稽核 originType D13、無 App 管理 API D14）、`infra/sql/002`+`003`。本版本已移除「待確認」語氣，僅在必要處保留「已評估未採用」的替代方案理由供追溯。
 
 ---
 
@@ -22,7 +22,7 @@
 5. [情境二：購物網站原生 App 直呼 Credential Manager（Digital Asset Links）](#5-情境二購物網站原生-app-直呼-credential-managerdigital-asset-links)
 6. [`FidoCredentialProviderService` 端的 origin 判定邏輯](#6-fidocredentialproviderservice-端的-origin-判定邏輯)
 7. [與 `api-contract.md` / 資料模型的關聯與建議改動](#7-與-api-contractmd--資料模型的關聯與建議改動)
-8. [本文件補充決策清單（待人類確認）](#8-本文件補充決策清單待人類確認)
+8. [補充決策定案清單（OB1–OB6）](#8-補充決策定案清單ob1ob6)
 9. [交接與後續行動](#9-交接與後續行動)
 
 ---
@@ -40,13 +40,13 @@ WebAuthn 的防釣魚（anti-phishing）保證，核心在 `clientDataJSON.origi
 
 ---
 
-## 2. 存取情境範圍的釐清與建議
+## 2. 存取情境範圍（定案）
 
-### 2.1 CLAUDE.md 現況：範圍未明訂
+> **定案（OB1）**：v1 **provider 程式碼一併支援瀏覽器與原生 App 兩種情境**；**原生 App 情境對每個租戶採 opt-in**——租戶須完成 `assetlinks.json` onboarding 並由平台登錄其 App 簽章指紋，才算開通該租戶的 App 內 FIDO 登入。純瀏覽器租戶零額外設定即可使用。以下 2.1–2.3 保留推導脈絡供追溯。
 
-CLAUDE.md 定義了「採用 FIDO 登入的購物網站」這個角色，但**未定義使用者是透過手機瀏覽器、還是購物網站自家原生 Android App 完成 FIDO 登入**。`api-contract.md` 前言只說明「所有 REST 端點的呼叫方是購物網站**後端**（server-to-server）」，並未限定使用者端（前端）是瀏覽器還是 App——這兩件事是不同層次，後端 server-to-server 的事實對「前端 origin 怎麼來」不構成答案。
+### 2.1 背景：CLAUDE.md 原未明訂範圍
 
-因此「v1 是否需要同時支援瀏覽器與原生 App 兩種存取情境」是一個 **【待人類確認：範圍】** 的問題，本文件不片面認定。
+CLAUDE.md 定義了「採用 FIDO 登入的購物網站」這個角色，但原**未定義使用者是透過手機瀏覽器、還是購物網站自家原生 Android App 完成 FIDO 登入**。`api-contract.md` 前言只說明「所有 REST 端點的呼叫方是購物網站**後端**（server-to-server）」，並未限定使用者端（前端）是瀏覽器還是 App——這兩件事是不同層次，後端 server-to-server 的事實對「前端 origin 怎麼來」不構成答案。此範圍缺口即 OB1，現已拍板（見上方定案）。
 
 ### 2.2 兩種情境的成本/風險差異
 
@@ -58,16 +58,16 @@ CLAUDE.md 定義了「採用 FIDO 登入的購物網站」這個角色，但**�
 | 實機驗證需求 | 低（PoC item 1 已驗 provider 掛載） | 高（DAL 驗證、OEM 差異須實機，對齊 PoC item 10） |
 | 對使用者的價值 | 網頁購物直接可用 | App 內購物免跳瀏覽器、體驗較佳 |
 
-### 2.3 本文件建議
+### 2.3 定案內容與理由（OB1）
 
-**建議 v1 範圍：**
+**v1 範圍（已拍板）：**
 
-1. **瀏覽器情境列為 v1 的強制基準（mandatory baseline）。** 理由：零租戶維運成本、對齊 PoC 目前假設、是所有購物網站都能立即使用的最小可行路徑。
-2. **原生 App 情境：provider 與資料模型「設計上一併支援」，但「正式啟用」採每租戶 opt-in，且是否納入 v1 正式承諾範圍列為待人類確認。** 理由分兩層：
-   - **provider 程式碼無論如何都必須改成動態取 origin**（不能寫死），而「動態取 origin」的正確實作**本來就要同時處理瀏覽器與原生 App 兩條路徑**（見第 6 節演算法）。把兩條路徑一次做對，成本幾乎等同只做瀏覽器，卻能避免日後回頭改 provider + 重測。故**程式碼層面建議一次做滿**。
-   - **但「對外承諾支援某租戶的原生 App 登入」有額外落地成本**：該租戶要完成 `assetlinks.json` onboarding、平台要登錄其 App 指紋、且 DAL / OEM 相容性須實機驗證（目前無實機，對齊 PoC「條件式通過 pending 實機」）。因此「是否在 v1 就對租戶開放原生 App 登入」建議由人類依上線時程與是否有租戶實際需要 App 內登入來拍板。
+1. **瀏覽器情境為 v1 強制基準（mandatory baseline）。** 理由：零租戶維運成本、對齊 PoC 假設、所有購物網站都能立即使用的最小可行路徑。
+2. **原生 App 情境：provider 與資料模型一併支援，對每個租戶採 opt-in 啟用。** 租戶須完成 `assetlinks.json` onboarding + 平台登錄其 App 簽章指紋（寫入 `tenant_app_bindings`）才算開通。理由：
+   - **provider 程式碼無論如何都必須改成動態取 origin**（不能寫死），而正確的動態解析**本來就要同時處理瀏覽器與原生 App 兩條路徑**（見第 6 節演算法）。一次做對成本幾乎等同只做瀏覽器，且避免日後返工重測。
+   - **原生 App 的真實 DAL 行為與 OEM 相容性仍須實機驗證**（目前無實機，對齊 PoC「條件式通過 pending 實機」）。opt-in 設計讓「某租戶實際開通 App 登入」與「平台整體上線」脫鉤：沒有租戶開通 App binding 前，此路徑不影響任何人。
 
-換句話說：**建議把「支援原生 App」拆成「程式碼能力」與「營運承諾」兩件事**。前者建議 v1 就做（避免 provider 返工）；後者（含實機驗證與租戶 onboarding 流程）可 opt-in／可延後，待人類確認。詳見 OB1。
+即「支援原生 App」拆成「程式碼能力（v1 即做）」與「對個別租戶的營運承諾（opt-in、需完成 onboarding 與實機驗證）」兩件事。
 
 ---
 
@@ -148,35 +148,32 @@ WebAuthn `clientDataJSON.origin` 在 Android 上有兩種合法形態：
 
 **(B) 把 App 簽章指紋（或 apk-key-hash origin）交給平台登錄**
 
-租戶把上述 `package_name` + `sha256_cert_fingerprints` 提供給平台（FIDO 服務營運方），平台換算成 `android:apk-key-hash:<H>` 形式的 app origin，**加入該租戶的 `expected_origin` 允許清單**（見 5.3）。此步是伺服器端把關的資料來源。
+租戶把上述 `package_name` + `sha256_cert_fingerprints` 提供給平台（FIDO 服務營運方），平台換算成 `android:apk-key-hash:<H>` 形式的 app origin，**寫入該租戶的 `tenant_app_bindings` 一列**（見 5.3）。此步是伺服器端把關的資料來源。
 
 > `<H>` = `BASE64URL_NOPAD( SHA-256( 簽章憑證 DER ) )`。注意 `assetlinks.json` 用的是**冒號分隔 hex** 呈現同一份 SHA-256，而 origin 用的是 **base64url** 呈現，兩者是同一雜湊的不同編碼；平台登錄工具需負責換算。
 
-### 5.3 `fido-server` / 資料模型的影響
+### 5.3 `fido-server` / 資料模型的影響（定案 OB3：新增 `tenant_app_bindings` 表）
 
-**核心結論：不需要改動六張核心表的結構即可支援，`expected_origin` 已能承載。** 但為了「管理介面顯示與稽核」，建議補一個輕量的租戶層記錄，作法二選一（列為待人類確認 OB3）。
+> **定案（OB3）**：採**新增第七張核心表 `tenant_app_bindings`**（完整 schema 見 `db-schema.md` 第 9 節 / DB17），**不**採「在 `tenants` 加 JSON 欄位」的替代方案。CLAUDE.md「六張核心表」敘述已一併更新為七張。
 
-- **必做（無 schema 變更）**：`tenants.expected_origin` 已是「可存 JSON 陣列字串」的允許清單，`OriginValidator` 已支援逐一比對。原生 App 租戶的允許清單即同時含 web 與 app 兩型，例如：
+- **origin 允許清單的組成**：伺服器驗證 origin 時，允許清單 = `tenants.expected_origin`（web origin，一律存在）∪ 該租戶 `tenant_app_bindings` 中 `status='ACTIVE'` 列的 `apk_key_hash_origin`（app origin，僅 opt-in 租戶有）。`OriginValidator` 現有的「逐一字串比對 allowlist」邏輯不變，只是允許清單的來源多了一個表；收到 app origin 與 web origin 的比對方式完全一致。範例允許清單：
 
-  ```json
-  ["https://shop.example.com", "android:apk-key-hash:R2f...base64url...Xy"]
+  ```
+  web  : "https://shop.example.com"                    ← tenants.expected_origin
+  app  : "android:apk-key-hash:R2f...base64url...Xy"   ← tenant_app_bindings.apk_key_hash_origin (ACTIVE)
   ```
 
-  伺服器端**不需要新邏輯**——收到 app origin 時，比對邏輯與 web origin 完全一致（都是字串比對 allowlist）。這是本設計刻意選 `expected_origin` allowlist 而非在程式碼寫死 origin 型別判斷的好處。
+- **`tenant_app_bindings` 存什麼**：每列一支授權 App，含 `package_name`、`sha256_cert_fingerprint`（raw 32 bytes）、`apk_key_hash_origin`（換算好的比對字串）、`label`、`status`（軟刪除支援簽章輪替）等。欄位權威定義見 `db-schema.md` 第 9 節。
 
-- **建議做（供管理/稽核，作法待人類確認 OB3）**：`expected_origin` 只存一串 origin，人類看不出「哪個 origin 對應哪支 App、指紋是什麼、誰在何時登錄」。建議二選一保存這層 metadata：
-  - **選項 A（輕量、不動核心表數）**：在 `tenants` 加一個可空欄位 `authorized_app_bindings NVARCHAR(MAX) NULL`，存 JSON 陣列，每筆含 `packageName` / `sha256CertFingerprint` / `apkKeyHashOrigin` / `label` / `addedAt`。優點：不新增表、對齊「六張核心表」既定範圍。缺點：JSON 欄位不利索引/多筆管理。
-  - **選項 B（較正規、但突破六表）**：新增第七張表 `tenant_app_bindings`（`tenant_id` FK、`package_name`、`sha256_fingerprint`、`apk_key_hash_origin`、`status`、`created_at`…）。優點：可稽核每筆 App 授權的增刪、支援一租戶多 App。缺點：**牴觸 CLAUDE.md「六張核心表」的既定敘述**，屬需人類確認的架構調整。
-
-  本文件傾向 **選項 A**（v1 中小規模、一租戶通常一支 App，JSON 欄位足夠；不動核心表數量、風險最小），但兩者皆列 OB3 待人類拍板。
+- **選 B（新表）而非選 A（`tenants` JSON 欄位）的理由（供追溯）**：新表可逐筆稽核 App 授權的增刪與輪替、支援一租戶多 App（正式/測試簽章並存）、指紋可建唯一索引防重複登錄；代價是核心表由六增為七，已回填 CLAUDE.md 與 db-schema.md（DB17）。選項 A 的 JSON 欄位雖不動表數，但不利索引與多筆稽核，經評估未採用。
 
 ### 5.4 為什麼**不**記在 `bound_devices`
 
-任務提到「要不要在 `bound_devices` 或 `tenants` 記錄授權 App 指紋」。明確結論：**應記在 `tenants`（租戶層），不可記在 `bound_devices`（裝置層）。** 理由：
+明確結論：**記在租戶層的 `tenant_app_bindings`，不可記在 `bound_devices`（裝置層）。** 理由：
 
 - `bound_devices` 記錄的是**終端使用者持有 FIDO 金鑰的實體手機**（其 TEE/StrongBox 硬體安全屬性），是**每位使用者、每台裝置**一列。
 - 購物網站 App 的簽章指紋是**整個租戶共用的一個屬性**（同一支 App，所有該租戶使用者共用同一簽章），與「使用者用哪台手機」完全正交。把它塞進 `bound_devices` 會造成每列重複儲存同一份租戶級資料、且語意錯置。
-- 故 App 授權指紋屬**租戶層**資料（`tenants` / 選項 B 的 `tenant_app_bindings`），與 `bound_devices` 無關。
+- 故 App 授權指紋屬**租戶層**資料（`tenant_app_bindings`），與 `bound_devices` 無關。
 
 ---
 
@@ -233,7 +230,7 @@ provider 端應在以下情況直接拒絕（回 `CreateCredentialUnknownExcepti
 
 1. **冒充受信任瀏覽器**：`getOrigin(allowlist)` 因簽章不符拋例外（呼叫方 package 在 allowlist 內但簽章對不上，典型的重打包冒充）。
 2. **無法取得可信呼叫方身分**：`callingAppInfo == null` 或 `signingInfo` 取不到簽章憑證。
-3. （原生 App 路徑的深度防禦，選配、對齊 OB2）provider 亦可選擇在本地抓取 `https://<rpId>/.well-known/assetlinks.json` 驗證「呼叫 App 的 package+指紋確實被該網域授權」後才簽；但**這不是安全必要條件**（伺服器 allowlist 已是不可繞過的把關），且會引入 provider 端網路相依與離線可用性問題。建議**預設不做**、交給伺服器把關，是否加此層深度防禦列 OB2。
+3. **（原生 App 路徑的深度防禦，定案 OB2：預設不做）** provider **預設不**自行抓取 `https://<rpId>/.well-known/assetlinks.json` 做 App↔網域驗證，改由**伺服器端 `tenant_app_bindings` 允許清單做唯一不可繞過的把關**。理由：伺服器已是 origin 最終權威；provider 端抓 DAL 會引入網路相依與離線可用性問題。若日後有需要，可再加此層深度防禦，但非 v1 必要。
 
 ### 6.4 受信任瀏覽器 allowlist（provider 靜態資產）
 
@@ -249,67 +246,74 @@ provider 端應在以下情況直接拒絕（回 `CreateCredentialUnknownExcepti
 
 ---
 
-## 7. 與 `api-contract.md` / 資料模型的關聯與建議改動
+## 7. 與 `api-contract.md` / 資料模型的關聯（已回填）
 
-> 以下為**建議**，供人類確認後再正式修訂 `api-contract.md` / `db-schema.md`；本文件不逕行改動那兩份文件。
+> 以下改動已於 OB1–OB6 拍板後**實際回填** `api-contract.md` 與 `db-schema.md`。
 
-### 7.1 安全性上「不需要」改 API 合約
+### 7.1 安全性核心：origin 驗證路徑不變
 
-現行註冊/登入 API 已把 `clientDataJSON` 交由伺服器解析並以 `expected_origin` 允許清單比對 origin（§2.2 步驟 2、§3.2 步驟 3）。原生 App 的 `android:apk-key-hash:...` origin 只是允許清單裡多一種字串型態，**驗證路徑不變、欄位不變**。因此就「把關安全」而言，API 合約可不動。
+註冊/登入 API 已把 `clientDataJSON` 交由伺服器解析並以允許清單比對 origin（§2.2 步驟 2、§3.2 步驟 3）。原生 App 的 `android:apk-key-hash:...` origin 只是允許清單裡多一種字串型態，**驗證路徑不變、請求/回應欄位不變**。允許清單來源從「僅 `tenants.expected_origin`」擴充為「`expected_origin`（web）+ `tenant_app_bindings`（app）」。
 
-### 7.2 建議的（非強制）調整
+### 7.2 已回填 `api-contract.md` 的項目
 
-1. **§1.2「RP ID 綁定」段補充 origin 說明**：明訂 `clientDataJSON.origin` 可為 web origin 或 `android:apk-key-hash:...`，兩者皆比對租戶 `expected_origin` 允許清單；並說明原生 App origin 的允許清單來源是租戶登錄的 App 簽章指紋（指向本文件）。
-2. **（選配）錯誤碼細分**：目前 origin/RP ID 不符共用 `403 RP_ID_MISMATCH`。可考慮為 origin 不符另設 `403 ORIGIN_NOT_ALLOWED`，便於購物網站分辨「是網域對不上還是 origin 不在允許清單」。屬體驗優化，非必要。（OB4）
-3. **（選配）稽核記錄 origin 型別**：建議在 `registration/result` / `authentication/result` 寫 `audit_log.detail` 時，記錄本次 ceremony 的 origin 與其型別（`WEB` / `NATIVE_APP`）。有助於事後鑑識「某使用者是從網頁還是 App 登入」。`audit_log` 為 JSON `detail` 欄位，**無 schema 變更**即可容納。（OB5）
-4. **（選配）在 `registration/result` Response / 裝置列表記錄註冊來源型別**：可在 `bound_devices.attestation_summary`（既有 JSON 欄位）或裝置回應中附註冊當下的 origin 型別，供管理介面顯示「此裝置是在 App 內或網頁註冊」。**無 schema 變更**（用既有 JSON 欄位）。屬管理便利性，非必要。
+1. **§1.2 補「Origin 綁定」段（D12）**：明訂 origin 可為 web origin 或 `android:apk-key-hash:...`，兩者比對同一份租戶允許清單（web 來源 `expected_origin`、app 來源 `tenant_app_bindings`）。
+2. **新增 `403 ORIGIN_NOT_ALLOWED` 錯誤碼（D12 / OB4）**：與 `RP_ID_MISMATCH` 區分，已加入 §1.4 通用錯誤碼表與 §2.2/§3.2 主要錯誤清單。
+3. **稽核記 origin 型別（D13 / OB5）**：`registration/result` / `authentication/result` 於 `audit_log.detail` 記 `originType`(`WEB`/`NATIVE_APP`)，用既有 JSON `detail` 欄位、**無 schema 變更**。
+4. **§5.3 新增「租戶已授權 App 清單（v1 無 API）」說明（D14 / OB6）**：見 7.3。
 
-### 7.3 租戶 App 指紋登錄的「管理介面 API」
+### 7.3 租戶 App 指紋登錄：v1 無 API 端點（定案 OB6）
 
-原生 App 情境需要一個「租戶登錄/輪替其授權 App 簽章指紋」的管理動作。這屬**營運/管理平面**，與現行 `api-contract.md`（服務購物網站**後端**的 ceremony API）不同層。建議**不塞進 v1 的 ceremony REST 合約**，而是：
+> **定案（OB6）**：租戶「登錄/輪替授權 App 簽章指紋」在 v1 **採人工 onboarding**，**不新增任何 REST 端點**。
 
-- v1 初期可由平台營運方於 onboarding 時**手動**寫入 `tenants`（設定 `expected_origin` 含 app origin + 選項 A/B 的 metadata），與現行「租戶開通、API Key 發放」同屬人工 onboarding 步驟。
-- 日後若原生 App 租戶增多，再評估提供自助式管理 API/後台。此範圍與時程列 OB6，待人類確認。
+- 租戶完成 `assetlinks.json` 部署後，把 App package + SHA-256 簽章指紋交給平台營運方，由營運方直接寫入 `tenant_app_bindings`（與「租戶開通、API Key 發放」同屬人工 onboarding 步驟）。
+- 不新增端點的理由：中小規模、一租戶通常一支 App，人工足夠；且 origin 驗證直接讀 `tenant_app_bindings`，ceremony 端點請求/回應結構無需改動。
+- 日後若原生 App 租戶增多需自助管理，再評估新增唯讀查詢/設定端點；`tenant_app_bindings.binding_uid` 已預留為對外識別。此擴充非 v1 範圍。
 
-### 7.4 資料模型改動彙整
+### 7.4 資料模型改動彙整（已定案）
 
-| 改動 | 是否必要 | schema 變更 | 對應 |
+| 改動 | 狀態 | schema 變更 | 對應 |
 |---|---|---|---|
-| `expected_origin` 允許清單納入 app origin | 原生 App 情境必要 | 無（既有欄位已支援 JSON 陣列） | 5.3 |
-| 租戶 App 授權 metadata（選項 A 加欄位 / 選項 B 加表） | 建議（管理/稽核用） | 有（二選一，待確認） | 5.3 / OB3 |
-| `audit_log.detail` 記 origin 型別 | 選配 | 無（既有 JSON 欄位） | 7.2 / OB5 |
+| origin 允許清單納入 app origin（`expected_origin` ∪ `tenant_app_bindings`） | 原生 App 情境必要 | 無（沿用既有比對邏輯） | 5.3 |
+| 新增 `tenant_app_bindings` 表存租戶 App 授權 | 已定案（OB3 選項 B） | **有**（db-schema.md 第 9 節 / DB17、infra/sql 002+003） | 5.3 / OB3 |
+| `audit_log.detail` 記 `originType` | 已定案（OB5） | 無（既有 JSON 欄位） | 7.2 / OB5 |
+| `ORIGIN_NOT_ALLOWED` 錯誤碼 | 已定案（OB4） | 無（API 合約 §1.4） | 7.2 / OB4 |
 
 ---
 
-## 8. 本文件補充決策清單（待人類確認）
+## 8. 補充決策定案清單（OB1–OB6）
 
-> 以下皆為 CLAUDE.md / 既有合約未涵蓋、由本文件先行提出、**尚未拍板**的項目。經人類確認後，OB1 / OB3 等會影響 CLAUDE.md「已確認決策」或 db-schema「六張核心表」敘述者，須回填對應文件。
+> 六項均已於 2026-07-22 由人類拍板。下表為**最終定案**（非提案）。已回填的文件見「回填狀態」欄。
 
-| 編號 | 決策提案 | 理由 | 影響面 |
+| 編號 | 定案內容 | 理由 | 回填狀態 |
 |---|---|---|---|
-| **OB1** | v1 範圍：**瀏覽器情境為強制基準**；**原生 App 情境於 provider/資料模型層一併支援，但正式對租戶啟用採 opt-in 且是否納入 v1 承諾待確認**。 | provider 動態取 origin 本就必須同時處理兩路徑，一次做滿避免返工；但原生 App 的實機/DAL/OEM 驗證與租戶 onboarding 有額外成本，宜與上線時程脫鉤。 | CLAUDE.md 需補「存取情境（瀏覽器/原生 App）」的範圍定義（情境 A 目前未細分） |
-| **OB2** | provider 端**預設不**自行抓取 `assetlinks.json` 做 App↔網域驗證，改由**伺服器 `expected_origin` 允許清單**做唯一不可繞過的把關；provider 端 DAL 驗證列為選配深度防禦。 | 伺服器已是 origin 最終權威；provider 端抓 DAL 會引入網路相依與離線問題。 | provider 實作範圍 |
-| **OB3** | 租戶 App 授權 metadata 保存方式：**選項 A（`tenants` 加 `authorized_app_bindings` JSON 欄位）** 或 **選項 B（新增 `tenant_app_bindings` 表）**。本文件傾向選項 A。 | 選項 A 不動「六張核心表」數量、v1 規模足夠；選項 B 較正規但牴觸 CLAUDE.md 六表敘述。 | db-schema.md（新增欄位或表）、CLAUDE.md 資料庫段（若選 B） |
-| **OB4** | 是否為 origin 不符新增 `403 ORIGIN_NOT_ALLOWED`（與 `RP_ID_MISMATCH` 區分）。 | 便於購物網站分辨錯因；非安全必要。 | api-contract.md §1.4 錯誤碼表 |
-| **OB5** | 是否於 `audit_log.detail` 記錄每次 ceremony 的 origin 與型別（WEB/NATIVE_APP）。 | 事後鑑識登入來源；用既有 JSON 欄位、無 schema 變更。 | api-contract.md §2.2/§3.2、稽核實作 |
-| **OB6** | 租戶「登錄/輪替授權 App 指紋」在 v1 採**人工 onboarding**，不納入 v1 ceremony REST 合約；自助管理 API 延後評估。 | 中小規模、原生 App 租戶初期少，人工足夠。 | 營運流程、日後管理平面規劃 |
+| **OB1** | v1 **provider 一併支援瀏覽器與原生 App 兩情境**；**原生 App 對每個租戶採 opt-in**（須完成 `assetlinks.json` onboarding + 平台登錄 App 指紋才開通）。 | provider 動態取 origin 本就須同時處理兩路徑，一次做滿避免返工；原生 App 的實機/DAL/OEM 驗證與 onboarding 成本以 opt-in 與上線時程脫鉤。 | CLAUDE.md 情境 A 敘述已補存取情境；本文件第 2 節 |
+| **OB2** | provider 端**預設不**自行抓 `assetlinks.json`；由伺服器 `tenant_app_bindings` 允許清單做唯一不可繞過把關；DAL 深度防禦列日後選配。 | 伺服器已是 origin 最終權威；provider 抓 DAL 引入網路相依與離線問題。 | 本文件第 6.3 節 |
+| **OB3** | **新增第七張核心表 `tenant_app_bindings`**（未採 `tenants` JSON 欄位方案）。 | 可逐筆稽核/輪替 App 授權、支援一租戶多 App、指紋建唯一索引；代價是六→七表。 | db-schema.md 第 9 節 / DB17；infra/sql 002+003；CLAUDE.md 六→七表 |
+| **OB4** | 新增 `403 ORIGIN_NOT_ALLOWED`，與 `RP_ID_MISMATCH` 區分。 | 便於購物網站分辨錯因。 | api-contract.md §1.4 / §2.2 / §3.2 / D12 |
+| **OB5** | `registration/result` / `authentication/result` 於 `audit_log.detail` 記 `originType`(WEB/NATIVE_APP)。 | 事後鑑識登入來源；用既有 JSON 欄位、無 schema 變更。 | api-contract.md §2.2 / §3.2 核心表對應 / D13 |
+| **OB6** | 租戶登錄/輪替 App 指紋 v1 採**人工 onboarding**，不納入 REST 合約。 | 中小規模、原生 App 租戶初期少，人工足夠。 | api-contract.md §5.3 / D14 |
 
 ---
 
 ## 9. 交接與後續行動
 
-**待人類確認（本文件無法自行拍板者）：**
+**已回填的文件（本次）：**
 
-- OB1 範圍問題（**最關鍵**）：v1 是否對租戶開放原生 App 登入，或僅瀏覽器？其餘 OB2–OB6 多依賴 OB1 的答案。
-- OB3 資料模型作法（選項 A / B），因涉及是否突破「六張核心表」，需人類定調後才回填 db-schema.md / CLAUDE.md。
+- `CLAUDE.md`：資料庫列六→七張核心表、補 `tenant_app_bindings`；架構情境 A 補「存取情境（瀏覽器 + 原生 App opt-in）」敘述。
+- `db-schema.md`：新增第 9 節 `tenant_app_bindings` 表（DB17）、更新總覽/ER 圖/索引總表/保留章節。
+- `api-contract.md`：`ORIGIN_NOT_ALLOWED`（D12）、稽核 `originType`（D13）、§5.3 無 App 管理 API（D14）、§1.2 Origin 綁定段。
+- `infra/sql/002_create_tables.sql`、`003_create_indexes.sql`：`tenant_app_bindings` 建表與索引。
 
-**確認後可交接 dev-engineer（不阻塞、可先動工的部分）：**
+**交接 dev-engineer（可動工）：**
 
-- 無論 OB1 結論為何，provider **都必須**把寫死的 `PocConfig.ORIGIN` 換成第 6 節的動態 origin 解析（至少完成瀏覽器路徑 + 拒絕冒充邏輯）。此項可先行實作，屬正向流程接線、模擬器可驗、與硬體 attestation 無關。
-- 若 OB1 確認要支援原生 App，再補：app origin 推導、`expected_origin` allowlist 納入 app origin、選項 A/B 的 metadata 儲存、與（實機取得後）DAL/OEM 實機驗證（對齊 PoC item 10「pending 實機」）。
+- provider：把寫死的 `PocConfig.ORIGIN` 換成第 6 節的動態 origin 解析（瀏覽器路徑 + 原生 App 路徑 + 拒絕冒充邏輯）。屬正向流程接線、模擬器可驗、與硬體 attestation 無關。
+- fido-server：origin 允許清單改為 `tenants.expected_origin` ∪ 該租戶 `tenant_app_bindings` active 列的 `apk_key_hash_origin`；origin 不符回 `403 ORIGIN_NOT_ALLOWED`；`audit_log.detail` 記 `originType`；新增 `tenant_app_bindings` JPA 實體與 H2 對應 schema。
+- 原生 App 路徑的真實 DAL 行為與 OEM 相容性，對齊 PoC item 10「pending 實機」收尾驗證。
 
-**確認後需回填的文件：**
+**交接 devops-engineer：**
 
-- CLAUDE.md：於「已確認的關鍵架構決策」補一列「WebAuthn origin 綁定 / 存取情境（瀏覽器 vs 原生 App）」，指向本文件（依 OB1 結論）。
-- `api-contract.md`：依 OB4/OB5 決定是否補錯誤碼與稽核欄位；§1.2 補 origin 說明（7.2）。
-- `db-schema.md`：依 OB3 決定是否加欄位/表。
+- `infra/sql/002`+`003` 已含第七張表，需**重新在 LocalDB 驗證含 `tenant_app_bindings` 的 schema 建置**是否正確（見本文件觸發的協調提醒）。
+
+**營運流程（人工 onboarding，OB6）：**
+
+- 原生 App 租戶開通時，營運方協助部署 `assetlinks.json` 檢查、換算 apk-key-hash origin、寫入 `tenant_app_bindings`。

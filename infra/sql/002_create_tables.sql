@@ -1,15 +1,16 @@
 /*
 ==============================================================================
  002_create_tables.sql
- 建立六張核心表（DDL 依據 docs/db-schema.md 第 3-8 節「權威 schema」）
+ 建立七張核心表（DDL 依據 docs/db-schema.md 第 3-9 節「權威 schema」）
 
  建立順序依外鍵相依性排列，且此順序已可直接依序執行（後面的表只會參照前面已建立的表）：
    1. tenants
-   2. fido_user_ref     -> tenants
-   3. fido_credentials  -> fido_user_ref, tenants
-   4. bound_devices     -> fido_credentials, fido_user_ref, tenants
-   5. auth_challenges   -> tenants, fido_user_ref
-   6. audit_log         -> tenants, fido_user_ref（device_pk 依 db-schema.md DB16 不設外鍵）
+   2. fido_user_ref        -> tenants
+   3. fido_credentials     -> fido_user_ref, tenants
+   4. bound_devices        -> fido_credentials, fido_user_ref, tenants
+   5. auth_challenges      -> tenants, fido_user_ref
+   6. audit_log            -> tenants, fido_user_ref（device_pk 依 db-schema.md DB16 不設外鍵）
+   7. tenant_app_bindings  -> tenants（db-schema.md 第 9 節 / DB17：原生 App 情境的 App 授權登錄）
 
  PK / UNIQUE / CHECK / FK 皆內嵌於各自 CREATE TABLE 陳述式中（而非拆到獨立檔案），
  原因：SQL Server 建表當下即可宣告參照已存在資料表的外鍵，內嵌可讀性較佳、且與
@@ -197,5 +198,33 @@ BEGIN
 END
 GO
 
-PRINT N'002_create_tables.sql 執行完成：六張核心表已建立/確認存在。';
+------------------------------------------------------------------------------
+-- 9. tenant_app_bindings（原生 App 情境的 Digital Asset Links 授權登錄，db-schema.md DB17）
+------------------------------------------------------------------------------
+IF OBJECT_ID(N'dbo.tenant_app_bindings', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.tenant_app_bindings (
+        app_binding_pk          BIGINT IDENTITY(1,1) NOT NULL,
+        binding_uid             UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_appbind_uid DEFAULT NEWID(),
+        tenant_id               BIGINT NOT NULL,
+        package_name            NVARCHAR(255) NOT NULL,
+        sha256_cert_fingerprint VARBINARY(32) NOT NULL,
+        apk_key_hash_origin     NVARCHAR(120) NOT NULL,
+        label                   NVARCHAR(100) NULL,
+        status                  NVARCHAR(20) NOT NULL CONSTRAINT DF_appbind_status DEFAULT 'ACTIVE',
+        revoked_at              DATETIME2(3) NULL,
+        revoked_reason          NVARCHAR(50) NULL,
+        created_at              DATETIME2(3) NOT NULL CONSTRAINT DF_appbind_created DEFAULT SYSUTCDATETIME(),
+        updated_at              DATETIME2(3) NOT NULL CONSTRAINT DF_appbind_updated DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT PK_tenant_app_bindings PRIMARY KEY (app_binding_pk),
+        CONSTRAINT UQ_appbind_uid UNIQUE (binding_uid),
+        CONSTRAINT UQ_appbind_tenant_pkg_fp UNIQUE (tenant_id, package_name, sha256_cert_fingerprint),
+        CONSTRAINT FK_appbind_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+        CONSTRAINT CK_appbind_status CHECK (status IN ('ACTIVE','REVOKED')),
+        CONSTRAINT CK_appbind_revreason CHECK (revoked_reason IN ('ADMIN','KEY_ROTATION','SECURITY'))
+    );
+END
+GO
+
+PRINT N'002_create_tables.sql 執行完成：七張核心表已建立/確認存在。';
 GO
