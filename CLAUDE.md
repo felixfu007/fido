@@ -36,7 +36,11 @@
 
 ## 目前階段
 
-可行性評估與 22 項規格缺口已全數確認。下一步：Android Credential Provider 技術驗證 PoC（2 週，10 項驗證項目，#1–5 為關鍵項目），由資深工程師執行中。PoC 通過後才進入正式開發時程。
+可行性評估與 22 項規格缺口已全數確認。REST API 合約（`docs/api-contract.md`）與六張核心表 DB schema（`docs/db-schema.md`）已定案；`fido-server` 後端骨架已建立，含真實 WebAuthn 密碼學驗證（簽章驗證、Android Key Attestation 憑證鏈驗證、TEE/StrongBox 判讀）、完整測試涵蓋率、JPA/Hibernate 持久層（本機開發用 H2，正式部署接 SQL Server，`infra/sql/` 已備妥建置腳本待正式環境套用）。
+
+Android Credential Provider 技術驗證 PoC 的 10 項驗證項目已具體定案，見 `docs/android-poc-checklist.md`（含每項的關鍵/非關鍵標記、模擬器可驗證/須實機驗證標註、通過判準）。與原本「#1–5 為關鍵項目」的粗略說法相比，定案後的關鍵項目改為聚焦「地基掛載 + 硬體金鑰 + android-key 格式對接」（清單項目 1–5），**登入 ceremony 端對端重新歸類為非關鍵**（assertion 簽章與硬體無關、伺服器端已有測試覆蓋）。
+
+開發環境目前沒有實體 Android 裝置，僅能用模擬器（Android 14 / API 34）驗證；PoC「通過」採**條件式通過（pending 實機）**：模擬器可驗證項目全數通過、關鍵風險已排除，即可先行推進正式開發時程，硬體聲明真偽與 OEM 相容性列為取得實機後的收尾驗證項目，不阻塞整體進度。PoC 由 dev-engineer 執行中。
 
 ## 團隊分工（Claude Code Subagents）
 
