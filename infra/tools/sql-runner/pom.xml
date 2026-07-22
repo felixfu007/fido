@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  infra/tools/sql-runner
+
+  一次性 / 可重複使用的 DevOps 工具：在沒有 sqlcmd.exe 或 Invoke-Sqlcmd 的環境
+  （例如本機 SQL Server LocalDB 開發環境）中，執行帶有 GO 批次分隔符號的 .sql 檔案。
+
+  背景：GO 是 SQLCMD / SSMS 專用的批次分隔符號，不是合法的 T-SQL 陳述式本身，
+  一般 JDBC Statement.execute() 無法直接處理含有 GO 的整份 .sql 檔案，因此本工具
+  會先依「獨立一行、內容為 GO」切割成多個批次，再依序透過 JDBC 執行。
+
+  用途：這不是應用程式碼，是 infra 維運工具，刻意與 fido-server/ 應用程式碼分開。
+  之後若在其他無 sqlcmd 的環境（例如另一台開發機、CI）需要執行 infra/sql/*.sql，
+  可重複使用本工具。
+
+  使用方式（範例）：
+    mvn -q -f infra/tools/sql-runner/pom.xml compile exec:java \
+      -Dexec.args="\"<JDBC_URL>\" infra/sql/001_create_database.sql infra/sql/002_create_tables.sql infra/sql/003_create_indexes.sql"
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.fido.ops</groupId>
+    <artifactId>sql-runner</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <mssql-jdbc.version>12.8.1.jre11</mssql-jdbc.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.microsoft.sqlserver</groupId>
+            <artifactId>mssql-jdbc</artifactId>
+            <version>${mssql-jdbc.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.2.0</version>
+                <configuration>
+                    <mainClass>com.fido.ops.sqlrunner.SqlBatchRunner</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
