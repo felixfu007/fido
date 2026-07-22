@@ -31,9 +31,12 @@ fido:
   rate-limit:
     default-tps: 100           # 對齊 CLAUDE.md 峰值容量目標；租戶可於 tenants.rate_limit_tps 覆寫
   attestation:
-    # 【重要】以下為「介面卡」骨架的可調參數，非真實密碼學驗證結果。
-    # 真正的 Android Key Attestation 憑證鏈驗證與 attStmt 簽章驗證尚未實作，
-    # 詳見 com.fido.server.webauthn 套件內每個 Stub* 類別的 Javadoc。
+    # real（預設）：Attestation statement 簽章、Android Key Attestation 憑證鏈（含內建
+    # Google 官方 root 信任集合）、Assertion 簽章一律使用真實密碼學驗證。
+    # stub：切回骨架 stub（見 com.fido.server.webauthn 套件內每個 Stub* 類別），僅供測試
+    # 環境使用，正式部署不應設為 stub。
+    mode: real
+    # 以下設定僅在 mode=stub 時才會生效。
     stub:
       chain-valid: true
       default-security-level: STRONG_BOX   # STRONG_BOX / TEE / SOFTWARE（設 SOFTWARE 可測試 422 HARDWARE_SECURITY_NOT_MET 分支）

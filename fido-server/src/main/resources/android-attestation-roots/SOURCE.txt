@@ -1,0 +1,37 @@
+來源：https://developer.android.com/privacy-and-security/security-key-attestation#root_certificate
+（官方 "Root certificates" / "Previously Issued Root Certificates" 區塊，逐字擷取，未修改內容）
+擷取日期：2026-07-21
+
+檔案對應：
+- google-hw-attestation-root-01-rsa-2022.pem
+    目前有效的兩張 root 之一（RSA，serial f9200...045 系列，2022 年重新簽發，
+    notAfter 2042-03-15）。
+- google-hw-attestation-root-02-ec-key-attestation-ca1-2025.pem
+    目前有效的另一張 root（EC P-384，CN=Key Attestation CA1，2025-07-17 簽發）。
+    官方頁面註明：「將於 2026-02-01 起開始簽發 attestation 憑證鏈」；本專案擷取時
+    （2026-07-21）已生效，故一併納入信任集合。
+- google-hw-attestation-root-03-rsa-2016-legacy.pem
+    「Previously Issued Root Certificates」之一（2016 年簽發，notAfter 2026-05-24）。
+- google-hw-attestation-root-04-rsa-2019-legacy.pem
+    「Previously Issued Root Certificates」之一（2019 年簽發，notAfter 2034-11-18；
+    對應 2019 年 Key Attestation 中繼憑證外洩事件後的重新簽發）。
+- google-hw-attestation-root-05-rsa-2021-legacy.pem
+    「Previously Issued Root Certificates」之一（2021 年簽發，notAfter 2036-11-13）。
+
+保留「Previously Issued」舊 root 的原因：市面上尚在使用中的既有 Android 裝置，其出廠時
+寫入的 attestation 憑證鏈可能仍鏈接到這些舊 root（尚未過期），拒絕它們會誤傷合法裝置。
+本專案的信任判斷方式為比對憑證鏈末端憑證的 SubjectPublicKeyInfo（公鑰）是否等於本目錄
+任一 root 憑證的公鑰（見官方頁面："If the root certificate in the attestation chain you
+receive contains this public key ... you know that your key is in hardware that Google
+believes to be secure"），而非要求逐位元組相同的憑證，因此同一把公鑰即使被 Google 以不同
+序號/效期重新簽發，仍會被正確辨識為受信任 root。
+
+維運注意：
+1. 若 Google 未來新增/撤換 root 憑證（例如已規劃的新一代 root），需要重新至上述官方頁面
+   核對並更新本目錄，這屬於部署/維運範疇，正式環境建議由 devops-engineer 建立定期核對
+   （或改為可設定的憑證檔案路徑，於部署時掛載）流程，而非寫死在應用程式 jar 內、只能靠改
+   程式碼發版才能更新。目前骨架版本先以「內嵌 jar 資源」方式提供最小可行實作。
+2. 本專案刻意不做 Google 線上憑證撤銷清單（revocation list，
+   https://android.googleapis.com/attestation/status）查詢——這會讓「全地端部署」的系統
+   多一個對外相依。是否要做、以及如何做（例如做成可設定開關、定期批次同步撤銷清單到本地
+   而非每次驗證都連外）是尚待確認的開放問題，詳見 dev-engineer 回報。

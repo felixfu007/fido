@@ -2,15 +2,20 @@ package com.fido.server.webauthn;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
- * 【介面卡 — 骨架 stub，非真實密碼學驗證，正式上線前必須替換】
+ * 【介面卡 — 骨架 stub，非真實密碼學驗證】
  *
  * <p>不還原 COSE 公鑰、不做任何 ECDSA/RSA 驗簽運算；僅檢查 signature 非空作為
- * 最基本的結構檢查，讓上層流程（sign counter 檢查、session JWT 簽發等）可被端對端測試。
+ * 最基本的結構檢查。
+ *
+ * <p>僅在明確設定 {@code fido.attestation.mode=stub} 時才會啟用；預設一律使用
+ * {@link RealAssertionSignatureVerifier}，正式路徑（含登入）不會走到本類別。
  */
 @Component
+@ConditionalOnProperty(prefix = "fido.attestation", name = "mode", havingValue = "stub")
 public class StubAssertionSignatureVerifier implements AssertionSignatureVerifier {
 
     private static final Logger log = LoggerFactory.getLogger(StubAssertionSignatureVerifier.class);

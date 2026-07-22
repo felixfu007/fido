@@ -50,12 +50,12 @@ import java.util.Optional;
  *
  * <p>已「真實」實作：challenge 產生與 60 秒時效檢核（{@link ChallengeService}）、
  * clientDataJSON 解析與 type/challenge/origin 驗證、attestationObject 頂層 CBOR 解碼與
- * authenticatorData 結構解析、防重複註冊、user_handle 產生與 fido_user_ref upsert、
- * 資料落表（fido_credentials / bound_devices）、audit_log 寫入。
- *
- * <p>仍為「介面卡」尚未實作真實密碼學：attStmt 簽章驗證
- * （{@link AttestationStatementVerifier}）、Android Key Attestation 憑證鏈驗證與
- * securityLevel 判讀（{@link AndroidKeyAttestationChainValidator}）。
+ * authenticatorData 結構解析、attStmt 簽章驗證（{@link AttestationStatementVerifier}，預設
+ * 實作見 {@link com.fido.server.webauthn.RealAttestationStatementVerifier}）、Android Key
+ * Attestation 憑證鏈驗證與 securityLevel 判讀（{@link AndroidKeyAttestationChainValidator}，
+ * 預設實作見 {@link com.fido.server.webauthn.RealAndroidKeyAttestationChainValidator}）、
+ * 防重複註冊、user_handle 產生與 fido_user_ref upsert、資料落表
+ * （fido_credentials / bound_devices）、audit_log 寫入。
  */
 @Service
 public class RegistrationService {
@@ -187,9 +187,10 @@ public class RegistrationService {
             throw new ApiException(ErrorCode.ATTESTATION_INVALID, "Attestation statement signature verification failed.");
         }
 
-        AttestationChainResult chainResult = chainValidator.validate(parsed);
+        AttestationChainResult chainResult = chainValidator.validate(parsed, challenge.getChallenge());
         if (!chainResult.chainValid()) {
-            recordFailure(tenant, userRef, "REG_FAIL", "attestation chain invalid");
+            recordFailure(tenant, userRef, "REG_FAIL",
+                    "attestation chain invalid: " + chainResult.detectedLevelRaw());
             throw new ApiException(ErrorCode.ATTESTATION_CHAIN_INVALID, "Android Key Attestation certificate chain is invalid.");
         }
         if (chainResult.securityLevel() == null) {
@@ -311,7 +312,6 @@ public class RegistrationService {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("chainValid", chainResult.chainValid());
         summary.put("securityLevel", chainResult.detectedLevelRaw());
-        summary.put("note", "STUB: 憑證鏈未實際驗證，見 AndroidKeyAttestationChainValidator");
         return summary.toString();
     }
 }

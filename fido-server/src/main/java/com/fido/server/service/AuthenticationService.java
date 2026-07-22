@@ -43,12 +43,12 @@ import java.util.Optional;
  *
  * <p>已「真實」實作：challenge 60 秒時效檢核與一次性消費、clientDataJSON 解析與
  * type/challenge/origin 驗證、authenticatorData 結構解析（含 rpIdHash 與 UV flag 的真實比對，
- * 因為這兩者是純 bytes 結構讀取，不需密碼學）、**sign counter 檢查與自動撤銷**（核心語意）、
+ * 因為這兩者是純 bytes 結構讀取，不需密碼學）、assertion 簽章驗證
+ * （{@link AssertionSignatureVerifier}，預設實作見
+ * {@link com.fido.server.webauthn.RealAssertionSignatureVerifier}：由 COSE 公鑰還原
+ * PublicKey 後驗簽）、**sign counter 檢查與自動撤銷**（核心語意）、
  * 防帳號列舉（externalUserId 帶入但查無使用者/憑證時仍回 200 + 空 allowCredentials）、
  * session JWT 簽發、audit_log 寫入。
- *
- * <p>仍為「介面卡」尚未實作真實密碼學：assertion 簽章驗證
- * （{@link AssertionSignatureVerifier}，需先由 COSE 公鑰還原 PublicKey 才能驗簽）。
  */
 @Service
 public class AuthenticationService {

@@ -24,6 +24,7 @@
     <properties>
         <java.version>21</java.version>
         <jjwt.version>0.12.6</jjwt.version>
+        <bouncycastle.version>1.81</bouncycastle.version>
     </properties>
 
     <dependencies>
@@ -44,6 +45,22 @@
         <dependency>
             <groupId>com.fasterxml.jackson.dataformat</groupId>
             <artifactId>jackson-dataformat-cbor</artifactId>
+        </dependency>
+
+        <!--
+            Android Key Attestation extension（OID 1.3.6.1.4.1.11129.2.1.17）是一段自訂 ASN.1
+            DER 結構（KeyDescription SEQUENCE），JDK 內建 X509Certificate 只能取出其未解碼的
+            extnValue 原始 bytes，無法解析內容。bcprov 提供 org.bouncycastle.asn1.* 這組通用
+            ASN.1 讀取原語（ASN1Sequence/ASN1Enumerated/ASN1OctetString...），足以完成本專案
+            唯一需要的欄位讀取（attestationSecurityLevel / keymasterSecurityLevel /
+            attestationChallenge），不需要額外的 CMS/PKIX 協定支援，故正式執行路徑只依賴
+            bcprov-jdk18on。X.509 憑證鏈本身的簽章驗證與效期檢查改用 JDK 原生
+            java.security.cert API（Certificate#verify / #checkValidity），不假手 BC。
+        -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
         </dependency>
 
         <!-- Session JWT（ES256）簽發與驗證 -->
@@ -68,6 +85,19 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            僅測試需要：組出「合法」的 Android Key Attestation 憑證鏈測試 fixture（含自訂
+            attestationSecurityLevel/attestationChallenge extension、簽章鏈）。bcpkix 的
+            X509v3CertificateBuilder / ContentSigner 是撰寫這類自簽測試憑證最省力的方式；
+            正式執行路徑（main scope）不使用，故限定 test scope，不會被打包進部署產物。
+        -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

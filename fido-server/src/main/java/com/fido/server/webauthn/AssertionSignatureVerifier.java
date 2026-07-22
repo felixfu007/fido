@@ -4,10 +4,12 @@ package com.fido.server.webauthn;
  * WebAuthn assertion（登入）簽章驗證介面：以已儲存的 COSE_Key 公鑰驗證
  * signature 是否為 (authenticatorData || SHA-256(clientDataJSON)) 的合法簽章。
  *
- * <p><b>【介面卡 — 尚未實作真實密碼學，僅骨架】</b>唯一實作為
- * {@link StubAssertionSignatureVerifier}。正式版需先由 COSE_Key bytes 還原
- * {@code java.security.PublicKey}（EC2/P-256 對應 ES256、RSA 對應 RS256），
- * 再以對應演算法（ECDSA / RSA-PKCS1）驗證簽章。建議導入 WebAuthn4J 取代本手刻介面。
+ * <p>正式路徑（{@code fido.attestation.mode=real}，預設）實作為
+ * {@link RealAssertionSignatureVerifier}：先由 COSE_Key bytes 還原
+ * {@code java.security.PublicKey}（EC2/P-256、P-384、P-521 對應 ES256/ES384/ES512；
+ * RSA 對應 RS256/RS384/RS512），再以對應演算法驗證簽章。測試環境可設
+ * {@code fido.attestation.mode=stub} 切回 {@link StubAssertionSignatureVerifier}
+ * （僅檢查 signature 非空，非真實驗簽）。
  */
 public interface AssertionSignatureVerifier {
 

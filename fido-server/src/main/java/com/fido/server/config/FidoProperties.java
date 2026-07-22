@@ -111,8 +111,25 @@ public class FidoProperties {
     }
 
     public static class Attestation {
+        /**
+         * {@code real}（預設）：使用真實密碼學驗證（{@code RealAttestationStatementVerifier} /
+         * {@code RealAndroidKeyAttestationChainValidator} / {@code RealAssertionSignatureVerifier}）。
+         * {@code stub}：切回骨架 stub（永遠通過 / 依 {@link Stub} 設定回傳固定結果），僅供
+         * 測試環境在不想組出真實 attestation/assertion 密碼學 fixture 時使用；正式部署
+         * 不應設為 stub。
+         */
+        private String mode = "real";
+
         @NestedConfigurationProperty
         private Stub stub = new Stub();
+
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
+        }
 
         public Stub getStub() {
             return stub;
