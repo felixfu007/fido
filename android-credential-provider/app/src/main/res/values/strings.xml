@@ -4,4 +4,14 @@
     <string name="create_entry_label">使用此裝置的硬體金鑰註冊</string>
     <string name="create_entry_description">FIDO Authenticator（StrongBox/TEE）</string>
     <string name="get_entry_label">使用此裝置的 FIDO 金鑰登入</string>
+
+    <!--
+        SetupStatusActivity（見 CLAUDE.md「啟動器畫面決策」Option B）專用字串。範圍嚴格限定：
+        啟用狀態顯示、深連結系統設定按鈕、版本/客服/隱私文字——不含任何 ceremony 或裝置管理文案。
+    -->
+    <string name="setup_status_activity_label">FIDO 驗證器設定</string>
+    <string name="setup_status_open_settings_button">前往系統設定啟用 / 管理</string>
+    <string name="setup_status_version_format">版本：%1$s</string>
+    <string name="setup_status_support_text">客服：如需帳號登入或裝置相關協助，請聯繫您使用之購物網站的客服窗口；本 App 不提供帳號登入、密碼救援或裝置管理功能。</string>
+    <string name="setup_status_privacy_text">個資聲明：本 App 僅於裝置 Android Keystore 硬體安全區（StrongBox/TEE）內產生並儲存裝置金鑰，不會在此畫面蒐集、顯示或傳輸您的個人資料。相關資料之蒐集、處理及利用，均由您使用之購物網站與 FIDO 驗證伺服器依其隱私權政策及個人資料保護法辦理。</string>
 </resources>

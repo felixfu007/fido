@@ -65,23 +65,17 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
 
 `OriginResolver.kt` 受信任瀏覽器 allowlist 已擴充並完成人工複核：dev-engineer 逐一比對 Google 官方即時服務端點 `gstatic.com/gpm-passkeys-privileged-apps/apps.json` 與兩個獨立開源密碼管理器專案的自動同步結果，**發現舊版 Chrome 穩定版指紋是先前未經查證即寫入的錯誤值**（任何權威/第三方來源皆查無比對），已更正並擴充涵蓋 Chrome（穩定版/Beta/Canary）、Firefox、Samsung Internet、Edge、Brave；我已獨立重新 fetch 官方端點逐位元組比對全部指紋（含多簽章項目）確認吻合，並重跑過 `OriginResolverTest` 8 項測試確認通過。原生 App origin 解析路徑（`android:apk-key-hash:...`）也已補上先前缺的模擬器端對端驗證：新增獨立驗證用模組 `android-credential-provider/testcaller/`（與 `:app` 無依賴、不同簽章身分，明確標示「驗證專用、非產品程式碼」），在 `fido_poc_avd` 模擬器上以真實 `CallingAppInfo`/`SigningInfo` 框架物件驅動，provider 端記錄的解析結果與獨立計算值完全一致。
 
+**啟動器畫面決策 Option B 已實作完成**：`SetupStatusActivity`（`android-credential-provider/app/src/main/java/com/fido/credentialprovider/ui/SetupStatusActivity.kt` + `SetupStatusSupport.kt` + `res/layout/activity_setup_status.xml`）已加入 `src/main/AndroidManifest.xml`，為 `prod`/`poc` 共用的 `MAIN`/`LAUNCHER` 元件（`poc` 額外合併 `HarnessActivity` 作第二個啟動圖示，不影響 `prod`）。嚴守範圍邊界，僅含啟用狀態、深連結系統設定按鈕、版本/客服/隱私文字，無任何 ceremony 或裝置管理 UI。兩個技術選型皆以 `javap` 反組譯 `android-34/android.jar` 與 `androidx.credentials:credentials:1.5.0` 位元組碼查證（非猜測）：(1) 啟用狀態查詢用 framework `android.credentials.CredentialManager#isEnabledCredentialProviderService(ComponentName)`（androidx 版本無此 API）；(2) 深連結沿用 androidx `CredentialManager.createSettingsPendingIntent()` 實作內部使用的同一組 `Intent("android.settings.CREDENTIAL_PROVIDER").setData(Uri.parse("package:"+套件名))`。已在 `fido_poc_avd` 模擬器上實機（模擬器）驗證：launcher 圖示可解析為 `SetupStatusActivity`、畫面正確渲染、按鈕深連結精準導向系統「Passwords & accounts > Additional providers > FIDO Authenticator」列（螢幕截圖確認）。**已知模擬器限制（非本次程式碼缺陷）**：`isEnabledCredentialProviderService` 呼叫在此模擬器映像上，無論查詢前後、也無論嘗試切換系統設定開關，皆從 Binder 端拋出解序列化失敗的 `NullPointerException`（`system_server` 端 `CredManSysService` log 已確認收到完全正確的 `ComponentName`，故排除呼叫端組錯參數的可能）；且系統設定開關本身在此模擬器上點擊後 log 顯示 `setEnabledProviders success` 但畫面/狀態未實際變成已啟用，研判是此 AVD 系統映像對第三方（非 Google 簽章）credential provider 的啟用管線限制或已知平台缺陷，非本 App 程式碼可修正。程式碼已針對此三態（true/false/null）容錯設計，查詢失敗會優雅降級為「無法判定，請至設定確認」文字並附測試（`SetupStatusSupportTest`，JVM 純字串邏輯，7 項全過）而不會使 App 崩潰；`enabled=true` 顯示路徑僅有單元測試涵蓋（`statusLabel(true)`），未能在此模擬器上端對端驗證，列為待實體裝置驗證項目（比照既有 PoC「條件式通過 pending 實機」精神）。
+
 ## 待辦事項
 
-`shopping-site-reference/` 的 CSRF 防護與 session cookie secure 預設值兩項待辦已完成：新增
-`com.shop.reference.security.CsrfCookieFilter`（手寫 double-submit cookie pattern，理由見該類別
-Javadoc——本專案未依賴 Spring Security，引入僅為了 CSRF 會拉入一整套與身分模型無關的自動配置，
-對參考範例是雜訊），涵蓋所有狀態變更端點（`POST /shop/api/session/login-as`、
-`POST /shop/api/session/logout`、`POST /shop/api/fido/registration/{options,result}`、
-`POST /shop/api/fido/authentication/{options,result}`、`DELETE /shop/api/fido/devices/{deviceId}`）；
-`SHOP_SESSION`/`XSRF-TOKEN` 兩個 cookie 的 `Secure` 屬性改由 `shop.session.cookie.secure`
-設定驅動，checked-in 預設值（`application.yml`）為 `true`，本機 HTTP 開發須以
-`--spring.profiles.active=local-http`（`application-local-http.yml`）明確 opt-out。
-`fido-server/src/test/java/com/fido/server/e2e/CrossProcessE2EManualRunner.java` 已同步更新
-（啟動 shopping-site-reference 子行程時套用 `local-http` profile、所有 POST/DELETE 呼叫夾帶
-CSRF header），重跑過完整跨行程 E2E（`scripts/run-cross-process-e2e.ps1`）確認 15 項檢查全數
-通過，IDOR 防護未受影響。
+目前無開放待辦事項。先前列出的三項（`shopping-site-reference/` CSRF 防護、session cookie
+`secure` 預設值、`android-credential-provider/` 啟動器畫面 Option B 實作）皆已完成，過程與結果
+記於上方「目前階段」相關段落（CSRF/cookie 見購物網站串接參考範例段落；啟動器畫面見「啟動器畫面決策」
+段落）。`externalUserId` DTO 欄位一項則是拍板保留、非「尚未處理」，理由同見上方段落。
 
-- `android-credential-provider/`（dev-engineer 待接）：依「啟動器畫面決策」的 Option B，在 `prod` flavor 的 `src/main/AndroidManifest.xml` 新增一個最小「設定/狀態」啟動器 Activity 並建畫面（啟用狀態＋深連結系統設定按鈕＋版本/客服/隱私文字）；嚴守範圍邊界，不得含任何 ceremony 或裝置管理 UI。待其 OriginResolver/瀏覽器允許清單任務結束後另案進行
+新的待辦事項出現時，請沿用既有慣例：在此列出簡短條目，完成後移除並把細節併入「目前階段」對應段落，
+不要讓已完成項目長期留在本清單。
 
 ## 團隊分工（Claude Code Subagents）
 

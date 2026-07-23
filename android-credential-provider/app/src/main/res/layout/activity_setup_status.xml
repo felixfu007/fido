@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SetupStatusActivity 的畫面：見 CLAUDE.md「啟動器畫面決策」Option B。刻意保持極簡（純狀態/
+    設定入口，非產品打磨畫面），比照 harness/activity_harness.xml 的 ScrollView+LinearLayout 寫法，
+    延續本專案「不用 Compose、findViewById 手動接元件」的既有慣例（見 CreatePasskeyActivity 等
+    Activity 未使用 view binding，HarnessActivity 也是 findViewById）。
+
+    嚴禁在此新增任何登入/註冊 ceremony 元件（如 challenge/username 輸入框、生物辨識觸發按鈕）或
+    裝置列表/撤銷 UI（如 RecyclerView、裝置清單、撤銷按鈕）——見 CLAUDE.md 該決策的硬性範圍邊界。
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/titleText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_status_activity_label"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:layout_marginBottom="16dp" />
+
+        <!-- 啟用狀態：由 SetupStatusActivity 於 onCreate/onResume 以
+             SetupStatusSupport.statusLabel(...) 填入文字，見該檔案說明。 -->
+        <TextView
+            android:id="@+id/providerStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="" />
+
+        <!-- 深連結系統「憑證提供者」設定畫面，見 SetupStatusSupport.buildCredentialProviderSettingsIntent。 -->
+        <Button
+            android:id="@+id/openSettingsButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/setup_status_open_settings_button" />
+
+        <TextView
+            android:id="@+id/versionText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/supportText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/setup_status_support_text" />
+
+        <TextView
+            android:id="@+id/privacyText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textSize="12sp"
+            android:text="@string/setup_status_privacy_text" />
+
+    </LinearLayout>
+</ScrollView>

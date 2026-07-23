@@ -57,6 +57,29 @@
             android:excludeFromRecents="true" />
 
         <!--
+            【CLAUDE.md「啟動器畫面決策」Option B】prod flavor 唯一帶 MAIN/LAUNCHER 的元件。
+            範圍嚴格限定：顯示 provider 啟用狀態、深連結系統憑證提供者設定、版本/客服/隱私文字
+            （見 SetupStatusActivity 檔頭完整說明與硬性範圍邊界）。**不得**在此加入任何登入/註冊
+            ceremony 或裝置管理 UI——ceremony 一律仍由系統以 PendingIntent 隱式啟動上方
+            CreatePasskeyActivity/GetPasskeyActivity。
+
+            本節點放在 src/main（而非 src/prod）：與 FidoCredentialProviderService 等其餘核心元件
+            同一慣例，屬於兩個 flavor 共用的正式產品程式碼，非 poc 專屬診斷功能。`poc` flavor 額外
+            合併 src/poc/AndroidManifest.xml 的 HarnessActivity 作為第二個 MAIN/LAUNCHER
+            （僅診斷建置會出現兩個啟動圖示，`prod` 建置只會有這一個）。
+        -->
+        <activity
+            android:name=".ui.SetupStatusActivity"
+            android:label="@string/setup_status_activity_label"
+            android:exported="true"
+            android:theme="@style/Theme.FidoCredentialProvider">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
             PoC 專用測試 harness（HarnessActivity）**不在**本檔案宣告。它只存在於 `poc` build
             flavor 的 src/poc/AndroidManifest.xml（Gradle manifest merger 會依當下建置的
             flavor 決定要不要併入），`prod` flavor 完全不含這個 activity 節點，也不含對應原始碼
