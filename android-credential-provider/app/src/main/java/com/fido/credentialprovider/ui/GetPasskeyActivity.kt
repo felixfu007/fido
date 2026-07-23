@@ -99,14 +99,39 @@ class GetPasskeyActivity : AppCompatActivity() {
             "origin 解析完成：sourceType=${resolvedOrigin.sourceType} origin=${resolvedOrigin.origin}",
         )
 
+        // 【2026-07-23 真機除錯根因修正，同 CreatePasskeyActivity】特權呼叫端（瀏覽器）身為
+        // WebAuthn client 本身會自行算好 clientDataHash 傳入，此時必須直接對這個 hash 簽章，
+        // 不可另外自建 clientDataJSON 重新雜湊，否則簽的 hash 會與瀏覽器最終吐給網頁/送往
+        // server 的 clientDataJSON 實際雜湊值不一致（即使 type/challenge/origin 三個值都對）。
+        val callerSuppliedClientDataHash = publicKeyOption.clientDataHash
+        Log.i(
+            TAG,
+            "呼叫端是否提供 clientDataHash（特權呼叫端如瀏覽器慣例）：" +
+                "${callerSuppliedClientDataHash != null}",
+        )
+
         requireUserVerification(
             title = "使用 FIDO 硬體金鑰登入",
-            onSuccess = { performAssertion(credentialIdB64Url, rpId, challengeB64Url, resolvedOrigin.origin) },
+            onSuccess = {
+                performAssertion(
+                    credentialIdB64Url,
+                    rpId,
+                    challengeB64Url,
+                    resolvedOrigin.origin,
+                    callerSuppliedClientDataHash,
+                )
+            },
             onFailure = { reason -> finishWithError("User verification failed: $reason") },
         )
     }
 
-    private fun performAssertion(credentialIdB64Url: String, rpId: String, challengeB64Url: String, origin: String) {
+    private fun performAssertion(
+        credentialIdB64Url: String,
+        rpId: String,
+        challengeB64Url: String,
+        origin: String,
+        callerSuppliedClientDataHash: ByteArray?,
+    ) {
         Thread {
             try {
                 val alias = LocalCredentialStore.aliasFor(credentialIdB64Url)
@@ -131,7 +156,10 @@ class GetPasskeyActivity : AppCompatActivity() {
                     challengeBase64Url = challengeB64Url,
                     origin = origin,
                 )
-                val clientDataHash = sha256(clientDataJson)
+                val clientDataHash = ClientDataBuilder.resolveClientDataHash(
+                    callerSuppliedClientDataHash,
+                    clientDataJson,
+                )
 
                 val signature = Signature.getInstance("SHA256withECDSA").apply {
                     initSign(privateKey)

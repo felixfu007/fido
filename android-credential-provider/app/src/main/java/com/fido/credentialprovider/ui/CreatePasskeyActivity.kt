@@ -22,7 +22,6 @@ import com.fido.credentialprovider.webauthn.CoseKeyEncoder
 import com.fido.credentialprovider.webauthn.OriginResolver
 import com.fido.credentialprovider.webauthn.RegistrationResponseFields
 import org.json.JSONObject
-import java.security.MessageDigest
 import java.security.Signature
 
 /**
@@ -55,6 +54,28 @@ class CreatePasskeyActivity : AppCompatActivity() {
         val requestJson = publicKeyRequest.requestJson
         Log.i(TAG, "取得 registration requestJson（節錄前 200 字）：${requestJson.take(200)}")
 
+        // 【2026-07-23 真機除錯根因修正】androidx.credentials.CreatePublicKeyCredentialRequest
+        // 帶有選填的 clientDataHash 欄位：特權呼叫端（例如 Chrome 這類瀏覽器）身為 WebAuthn
+        // 規範定義的「client」本身，才是唯一有資格建構 CollectedClientData／clientDataJSON 的一方
+        // （這正是規範把 origin 綁定交給 client 而非 authenticator 驗證的原因），因此會自行算好
+        // clientDataHash 傳進來，並預期 provider（=authenticator 角色）直接對這個 hash 簽章，
+        // 不要自作主張另外建構一份 clientDataJSON 再重新雜湊——provider 端算出來的 JSON 位元組
+        // 幾乎必然與瀏覽器最終實際吐給網頁 JS／送給 server 的 clientDataJSON 不同（即使
+        // type/challenge/origin 三個「值」都對，逐 byte 內容也不會相同：例如欄位順序、空白、是否
+        // 含 crossOrigin），導致簽的 hash 與最終送到 server 驗證用的 hash 對不上，攻自己方伎倆
+        // 逃過既有的 type/challenge/origin 值比對（那些只檢查值，不檢查逐 byte 內容），只在
+        // attStmt.sig 密碼學驗證這一關才會現形——這正是真機以 Chrome 實測（本專案至今第一次真的
+        // 走過 Chrome 這條路）才首次踢到、模擬器/單元測試從未踢到的原因，因為兩者都是自己造
+        // 請求、自己不會設 clientDataHash。若呼叫端沒有提供這個欄位（例如原生 App opt-in 情境，
+        // 呼叫端本身不是瀏覽器，見 docs/origin-binding.md），則落回本專案原本自建 clientDataJSON
+        // 的路徑，因為那個情境下沒有其他權威來源可用。
+        val callerSuppliedClientDataHash = publicKeyRequest.clientDataHash
+        Log.i(
+            TAG,
+            "呼叫端是否提供 clientDataHash（特權呼叫端如瀏覽器慣例）：" +
+                "${callerSuppliedClientDataHash != null}",
+        )
+
         val parsed = try {
             parseCreationOptions(requestJson)
         } catch (e: Exception) {
@@ -86,7 +107,9 @@ class CreatePasskeyActivity : AppCompatActivity() {
 
         requireUserVerification(
             title = "註冊 FIDO 硬體金鑰",
-            onSuccess = { performRegistration(parsed, resolvedOrigin.origin) },
+            onSuccess = {
+                performRegistration(parsed, resolvedOrigin.origin, callerSuppliedClientDataHash)
+            },
             onFailure = { reason -> finishWithError("User verification failed: $reason") },
         )
     }
@@ -103,7 +126,11 @@ class CreatePasskeyActivity : AppCompatActivity() {
         return CreationOptions(rpId = rpId, challengeB64Url = challenge)
     }
 
-    private fun performRegistration(options: CreationOptions, origin: String) {
+    private fun performRegistration(
+        options: CreationOptions,
+        origin: String,
+        callerSuppliedClientDataHash: ByteArray?,
+    ) {
         Thread {
             try {
                 val credentialIdB64Url = LocalCredentialStore.randomCredentialIdBase64Url()
@@ -142,7 +169,12 @@ class CreatePasskeyActivity : AppCompatActivity() {
                             challengeBase64Url = options.challengeB64Url,
                             origin = origin,
                         )
-                        val clientDataHash = sha256(clientDataJson)
+                        // 【2026-07-23 真機除錯根因修正】見 onCreate 內對 callerSuppliedClientDataHash
+                        // 的說明：有提供就必須簽這個 hash，不可另外自建 clientDataJSON 重新雜湊。
+                        val clientDataHash = ClientDataBuilder.resolveClientDataHash(
+                            callerSuppliedClientDataHash,
+                            clientDataJson,
+                        )
 
                         val signature = Signature.getInstance("SHA256withECDSA").apply {
                             initSign(outcome.privateKey)
@@ -289,8 +321,6 @@ class CreatePasskeyActivity : AppCompatActivity() {
 
     private fun b64UrlDecode(s: String): ByteArray =
         Base64.decode(s, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-
-    private fun sha256(input: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(input)
 
     private fun toHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 }

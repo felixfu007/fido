@@ -109,9 +109,17 @@ class FidoCredentialProviderService : CredentialProviderService() {
     }
 
     private fun buildEntriesForOption(option: BeginGetPublicKeyCredentialOption): List<PublicKeyCredentialEntry> {
-        // 本 PoC 單一 rpId（見 PocConfig），故直接列出本機所有已註冊 credential；正式產品應
-        // 依 option.requestJson 內的 rpId / allowCredentials 過濾。
-        val credentialIds = LocalCredentialStore.listCredentialIds(applicationContext, PocConfig.RP_ID)
+        // 【2026-07-23 真機登入驗證修正】原本無條件套用 PocConfig.RP_ID（"shop.example.com"）
+        // 過濾本機已註冊 credential，導致以其他 rpId 註冊的裝置（例如本機 Chrome 真機測試環境
+        // 用 rpId=localhost，因為手機連不到 shop.example.com，見 CLAUDE.md 任務環境說明）在
+        // 登入時被此 provider 判定「查無本機 passkey entry」而完全不出現在系統選單——不是
+        // clientDataHash 那個根因造成的問題，是本檔案自己這處過濾條件寫死的既有已知缺口
+        // （見本函式原本的註解），這裡把它按該註解已指出的方向修正：優先採用
+        // option.requestJson 內實際的 rpId（PublicKeyCredentialRequestOptions 頂層 "rpId"
+        // 欄位，對齊 fido-server AuthenticationOptionsResponse.AssertionOptions.rpId），解析
+        // 失敗或缺漏才 fallback 到 PocConfig.RP_ID，維持 PoC 單租戶情境下的原本行為不變。
+        val rpId = resolveRpIdFromRequestJson(option.requestJson) ?: PocConfig.RP_ID
+        val credentialIds = LocalCredentialStore.listCredentialIds(applicationContext, rpId)
         return credentialIds.map { credentialId ->
             val intent = Intent(applicationContext, GetPasskeyActivity::class.java).apply {
                 data = Uri.parse("fido-provider://credential/$credentialId")
@@ -130,6 +138,13 @@ class FidoCredentialProviderService : CredentialProviderService() {
                 option,
             ).build()
         }
+    }
+
+    private fun resolveRpIdFromRequestJson(requestJson: String): String? = try {
+        org.json.JSONObject(requestJson).optString("rpId").takeIf { it.isNotBlank() }
+    } catch (e: Exception) {
+        Log.w(TAG, "getOptions requestJson 解析 rpId 失敗，改用 PocConfig.RP_ID：${e.message}")
+        null
     }
 
     private fun shortLabel(credentialId: String): String {
