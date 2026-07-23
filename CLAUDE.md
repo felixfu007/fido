@@ -43,7 +43,15 @@ Android Credential Provider 技術驗證 PoC 的 10 項驗證項目已具體定�
 
 開發環境目前沒有實體 Android 裝置，僅能用模擬器（Android 14 / API 34）驗證；PoC「通過」採**條件式通過（pending 實機）**：模擬器可驗證項目全數通過、關鍵風險已排除，即可先行推進正式開發時程，硬體聲明真偽與 OEM 相容性列為取得實機後的收尾驗證項目，不阻塞整體進度。
 
-**PoC 執行完畢，結論：條件式通過（pending 實機）。** `android-credential-provider/` 專案已建立（`FidoCredentialProviderService` + StrongBox/TEE 金鑰產生 + 手寫 CBOR 組出 `fmt=android-key` attestationObject），關鍵項目 1–5 在模擬器上全數驗證通過，其中風險最高的項目 3（自訂 provider 能否產出伺服器可解析的 android-key 格式）已用**模擬器真實 Android Keystore 吐出的憑證鏈**（非僅 JVM 自簽測試 fixture）端對端送驗 `fido-server`（`fido.attestation.mode=real`）確認可行。硬體安全等級本身（StrongBox/TEE 是否真的達標）因模擬器無真實安全硬體，仍待實體裝置驗證；`fido-server` 新增 `fido.attestation.poc-trust.*` 設定（預設關閉、僅供 PoC 期間額外信任模擬器測試 root，不影響正式路徑的 Google root 信任集合）。詳細逐項結果見執行紀錄。原本待釐清的「原生 App 情境下的 origin 綁定架構」已由 systems-analyst 定案於 `docs/origin-binding.md`（OB1–OB6 六項決策經人類拍板，含新增第七張表 `tenant_app_bindings`、`ORIGIN_NOT_ALLOWED` 錯誤碼、稽核 originType、原生 App opt-in 範圍），並已回填 CLAUDE.md / db-schema.md / api-contract.md / infra/sql；待交接 dev-engineer（provider 動態 origin、server origin 允許清單與 JPA 實體）與 devops-engineer（LocalDB 重新驗證含第七張表的 schema）。另一開放問題「PoC harness 程式碼是否要移出正式 APK」仍待處理。
+**PoC 執行完畢，結論：條件式通過（pending 實機）。** `android-credential-provider/` 專案已建立（`FidoCredentialProviderService` + StrongBox/TEE 金鑰產生 + 手寫 CBOR 組出 `fmt=android-key` attestationObject），關鍵項目 1–5 在模擬器上全數驗證通過，其中風險最高的項目 3（自訂 provider 能否產出伺服器可解析的 android-key 格式）已用**模擬器真實 Android Keystore 吐出的憑證鏈**（非僅 JVM 自簽測試 fixture）端對端送驗 `fido-server`（`fido.attestation.mode=real`）確認可行。硬體安全等級本身（StrongBox/TEE 是否真的達標）因模擬器無真實安全硬體，仍待實體裝置驗證；`fido-server` 新增 `fido.attestation.poc-trust.*` 設定（預設關閉、僅供 PoC 期間額外信任模擬器測試 root，不影響正式路徑的 Google root 信任集合）。詳細逐項結果見執行紀錄。原本待釐清的「原生 App 情境下的 origin 綁定架構」已由 systems-analyst 定案於 `docs/origin-binding.md`（OB1–OB6 六項決策經人類拍板，含新增第七張表 `tenant_app_bindings`、`ORIGIN_NOT_ALLOWED` 錯誤碼、稽核 originType、原生 App opt-in 範圍），並已回填 CLAUDE.md / db-schema.md / api-contract.md / infra/sql；devops-engineer 已完成 LocalDB 重新驗證含第七張表的 schema，dev-engineer 已完成 provider 動態 origin 解析與 server 端 origin 允許清單/JPA 實體。PoC harness 程式碼已用 Gradle product flavor（`prod`/`poc`）分離，正式建置產物不含診斷程式碼，此開放問題已解決。
+
+購物網站串接參考範例（`shopping-site-reference/`）已建立，示範註冊/登入/裝置管理三個代理流程，核心為 `FidoSessionJwtValidator`（不信任回應 `verified` 欄位，只信任自行驗證過的 session JWT）。過程中發現的 IDOR 缺口（`externalUserId` 未限定為呼叫端已驗證的登入使用者）已修復：範例現在一律從購物網站自己的登入 session 取得 `externalUserId`，並已將此責任邊界明文寫入 `docs/api-contract.md`（D15）。
+
+## 待辦事項
+
+- `shopping-site-reference/`：`externalUserId` 目前保留為選填相容欄位（用於示範「夾帶不同值即拒絕」），評估是否要直接從請求 DTO 移除，讓這個攻擊面在型別層級就不存在
+- `shopping-site-reference/`：尚未實作 CSRF 防護（狀態變更端點僅靠 `SameSite=Lax` cookie），示範範例是否要一併補上正確模式待評估
+- `shopping-site-reference/`：session cookie 目前 `secure=false`（方便本機 HTTP 測試），正式部署（全站 TLS）需要改為 `true`
 
 ## 團隊分工（Claude Code Subagents）
 
