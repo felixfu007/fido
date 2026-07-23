@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.4</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.shop.reference</groupId>
+    <artifactId>shopping-site-reference</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <name>shopping-site-reference</name>
+    <description>
+        「採用 FIDO 登入的購物網站」參考串接範例（非正式產品，非本專案交付範圍內的真實電商系統）。
+        示範購物網站後端要如何以 server-to-server 方式呼叫 fido-server 的 REST API
+        （docs/api-contract.md）完成 FIDO 註冊/登入代理、session JWT 驗證、裝置管理代理，
+        供之後真正的購物網站工程團隊照抄整合模式。刻意不依賴 fido-server 原始碼或其 Maven
+        artifact —— 真實的購物網站團隊不會、也不應該取得 fido-server 的原始碼，只會拿到
+        docs/api-contract.md 這份合約，所以本專案的 client 端 DTO 皆為依合約重新宣告的獨立
+        型別（見 com.shop.reference.fidoclient.dto），並非共用 fido-server 的 record。
+    </description>
+
+    <properties>
+        <java.version>21</java.version>
+        <jjwt.version>0.12.6</jjwt.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+            用於驗證 fido-server 簽發的 session JWT（ES256）。與 fido-server 使用同一套函式庫
+            （版本一致純屬巧合般地實際：兩邊都要處理 JWS/ES256，是市面上最成熟的 Java JWT 函式庫，
+            並非因為本專案依賴 fido-server 的實作）。
+        -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

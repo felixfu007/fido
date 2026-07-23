@@ -1,0 +1,34 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: shopping-site-reference
+  jackson:
+    default-property-inclusion: non_null
+
+# ---------------------------------------------------------------------------
+# 對接 fido-server：直接沿用 fido-server 開發環境的種子租戶（DevDataSeeder，
+# fido.dev-seed.*，見 fido-server/src/main/resources/application.yml），本專案不建立
+# 任何租戶邏輯（依任務範圍界定）。
+#
+# base-url 指向本機跑起來的 fido-server（預設 port 8443，見
+# fido-server/src/main/resources/application.yml 的 server.port）。fido-server 目前並未在
+# 應用層強制 server.ssl（TLS 由部署層/反向代理負責，見 CLAUDE.md「傳輸安全」與
+# ApiKeyAuthFilter 沒有任何 isSecure() 檢查），本機開發因此直接用 http 呼叫，與 fido-server
+# 既有測試套件的假設一致；正式部署兩邊都必須走 TLS。
+# ---------------------------------------------------------------------------
+fido-client:
+  base-url: "http://localhost:8443"
+  api-key: "dev-api-key-00000000000000000000"
+  tenant-id: ""   # 選填交叉檢查（X-Tenant-Id），示範環境留空即可（api-contract.md D2）
+  # 必須等於 fido-server 端 fido.session-jwt.issuer 設定值（見
+  # fido-server/src/main/resources/application.yml），purchasing site 端獨立驗證 JWT 的 iss。
+  expected-issuer: "https://fido.example.internal"
+  # 必須等於「自己的網域」= 種子租戶的 rp_id（fido.dev-seed.rp-id=shop.example.com）。
+  expected-audience: "shop.example.com"
+  jwks-cache-ttl-seconds: 300
+
+logging:
+  level:
+    com.shop.reference: INFO
