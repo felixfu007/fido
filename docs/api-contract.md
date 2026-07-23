@@ -1,7 +1,7 @@
 # FIDO 驗證伺服器 — REST API 合約
 
 - 版本：v1（草案，待人工複核）
-- 最後更新：2026-07-21
+- 最後更新：2026-07-23
 - 適用架構情境：A（標準 WebAuthn，同裝置）
 - 對應共識文件：`d:\fido\CLAUDE.md`
 
@@ -16,6 +16,7 @@
 1. [API 總覽與慣例](#1-api-總覽與慣例)
    - 1.1 Base path 與版本策略
    - 1.2 租戶識別與認證（API Key）
+     - 1.2.1 終端使用者身分驗證是呼叫端的責任（防 IDOR）
    - 1.3 短時效自簽 JWT（session 交接）
    - 1.4 通用錯誤格式與錯誤碼
    - 1.5 資料編碼慣例
@@ -64,6 +65,16 @@
   - origin 不在允許清單 → `403 ORIGIN_NOT_ALLOWED`（與 RP ID 不符的 `RP_ID_MISMATCH` 區分，便於購物網站分辨錯因）。
 - 缺少或無效 API Key → `401 UNAUTHENTICATED`。API Key 對應租戶被停用 → `403 TENANT_DISABLED`。
 - **【本文件補充決策 D3】** 全域速率限制：每租戶預設 100 TPS（對齊 CLAUDE.md 峰值容量目標），超過回 `429 RATE_LIMITED`，帶 `Retry-After` header。
+
+#### 1.2.1 終端使用者身分驗證是呼叫端的責任（防 IDOR）
+
+- **【本文件補充決策 D15】** `X-API-Key` **只驗證「租戶身分」，不驗證「終端使用者身分」**。FIDO 伺服器是多租戶後端驗證服務、非身分來源（對齊 CLAUDE.md 定位），它**不知道**購物網站那側「目前登入的是誰」，也**無從**得知某次 HTTP 呼叫是否真由 `externalUserId` 本人發起。
+- 因此，**凡請求路徑或參數帶 `externalUserId` 的端點**（註冊 §2.1 / §2.2、裝置管理 §4.1 / §4.2、查詢 §5.1 / §5.2），**呼叫端（購物網站後端）必須自行確保**代入的 `externalUserId` 等於「本次 HTTP 請求所對應、已通過購物網站自家帳密系統驗證的登入使用者」。伺服器**不會、也無法代為檢查**此事。
+- 正確做法：`externalUserId` 應由購物網站後端從**自己的登入 session / 授權上下文**取得，再以 server-to-server 帶入本 API；**絕不可**直接把前端（瀏覽器 / App）送來的 `externalUserId` 原封不動轉呼叫本 API。
+- **未落實此把關的具體風險 —— IDOR（Insecure Direct Object Reference，越權存取他人物件）**：若購物網站後端信任前端傳入的 `externalUserId`，任一已登入使用者 A 只要竄改該值為使用者 B 的 ID，即可：
+  - **列出 / 撤銷使用者 B 的裝置**（§4.1 / §4.2）—— A 可把 B 的 FIDO 裝置全部撤銷，形同對 B 的阻斷服務；
+  - **查閱 B 的綁定狀態與稽核歷程**（§5.1 / §5.2）—— 洩漏 B 的隱私與操作紀錄；
+  - **替使用者 B 加掛一台 A 自己掌控的 FIDO 裝置**（§2.1 / §2.2）—— 之後 A 即可用該裝置以 B 的身分通過 FIDO 登入，**等同帳號接管**。
 
 > 端點 3.3（JWKS）與 health 端點為**公開端點**，不需 API Key。
 
@@ -148,11 +159,13 @@
 
 由購物網站後端在使用者（已用帳密登入）要求「新增 FIDO 裝置」時呼叫。
 
+> **安全提醒（IDOR，見 §1.2.1 / D15）**：`externalUserId` 必須取自購物網站後端**自己的登入 session**，不可信任前端傳入值。否則使用者 A 可指定使用者 B 的 ID，替 B 加掛一台 A 自己掌控的 FIDO 裝置（§2.2 完成註冊後），之後即能以 B 的身分通過 FIDO 登入，**等同帳號接管**。
+
 **Request**
 
 | 欄位 | 型別 | 必填 | 說明 |
 |---|---|---|---|
-| `externalUserId` | string | 是 | 購物網站的使用者 ID（身分權威來源在購物網站） |
+| `externalUserId` | string | 是 | 購物網站的使用者 ID（身分權威來源在購物網站）。**須為本次請求的已驗證登入使用者，見 §1.2.1 / D15。** |
 | `displayName` | string | 否 | WebAuthn `user.displayName`，UI 顯示用 |
 | `deviceLabel` | string | 否 | 使用者為此裝置取的名稱，成功註冊後寫入 `bound_devices.device_name` |
 
@@ -198,12 +211,14 @@
 
 前端 `create()` 完成後，購物網站後端把結果轉交本端點驗證。
 
+> **安全提醒（IDOR，見 §1.2.1 / D15）**：`externalUserId` 同樣須取自後端登入 session，且應與 §2.1 為同一使用者；若信任前端傳入值，新註冊的裝置會被綁到攻擊者指定的他人帳號上（帳號接管風險）。
+
 **Request**
 
 | 欄位 | 型別 | 必填 | 說明 |
 |---|---|---|---|
 | `ceremonyId` | string | 是 | 2.1 回傳值 |
-| `externalUserId` | string | 是 | 與 2.1 相同使用者 |
+| `externalUserId` | string | 是 | 與 2.1 相同使用者。**須為本次請求的已驗證登入使用者，見 §1.2.1 / D15。** |
 | `credential.id` | string | 是 | base64url credential id |
 | `credential.rawId` | string | 是 | base64url |
 | `credential.type` | string | 是 | 固定 `public-key` |
@@ -347,10 +362,14 @@
 ## 4. 裝置管理 API
 
 > 對應 CLAUDE.md「允許使用者註冊多台裝置，提供管理介面」。這些端點由購物網站後端（使用者已帳密登入的裝置管理頁）呼叫。
+>
+> **安全提醒（IDOR，見 §1.2.1 / D15）**：本節兩端點的 `{externalUserId}` 皆位於 URL 路徑。購物網站後端**必須**確保該值等於本次請求的已驗證登入使用者，不可用前端直接傳入的值組 URL。否則使用者 A 只要改動路徑中的 ID，就能**列出或撤銷使用者 B 的裝置**（§4.2 撤銷 B 全部裝置形同對 B 阻斷 FIDO 登入），此為典型 IDOR 越權。注意：§4.1 / §4.2 依 D7 防列舉策略對「查無 / 不屬於該使用者」一律回 200（空清單 / 冪等 no-op），**不代表**伺服器有做終端使用者授權把關——授權完全由呼叫端負責。
 
 ### 4.1 列出使用者已註冊裝置
 
 `GET /api/v1/users/{externalUserId}/devices`
+
+> **IDOR 提醒**：`{externalUserId}` 須為本次請求的已驗證登入使用者，否則將洩漏他人裝置清單（見 §1.2.1 / D15）。
 
 **Query 參數**
 
@@ -394,6 +413,8 @@
 ### 4.2 撤銷 / 刪除裝置
 
 `DELETE /api/v1/users/{externalUserId}/devices/{deviceId}`
+
+> **IDOR 提醒**：`{externalUserId}` 須為本次請求的已驗證登入使用者，否則使用者 A 可撤銷使用者 B 的裝置（見 §1.2.1 / D15）。伺服器僅驗證 `{deviceId}` 是否屬於路徑帶入的 `{externalUserId}`+租戶（不屬於則冪等 no-op），但**無法驗證該 `externalUserId` 是否即是呼叫者本人**。
 
 - 對應 CLAUDE.md「使用者主動撤銷」。
 - **【本文件補充決策 D10】** 採**軟刪除**：將 `bound_devices` 與其 `fido_credentials` 標記 `status=REVOKED`（`revoked_at`, `revoked_reason=USER_REQUEST`），**不實體刪列**，以保留稽核紀錄（對齊 CLAUDE.md 稽核保留 1 年）。呼叫端如需「永久刪除」語意仍以撤銷呈現。
@@ -511,6 +532,7 @@ R=讀 C=新增 U=更新。所有查詢皆隱含以 API Key 對應租戶作 `tena
 | D12 | Origin 綁定：`clientDataJSON.origin` 比對租戶允許清單（web origin 於 `tenants.expected_origin`、app origin 於 `tenant_app_bindings`）；不符回 `403 ORIGIN_NOT_ALLOWED`（與 `RP_ID_MISMATCH` 區分） | 對齊 origin-binding.md OB1/OB4，人類已拍板；防釣魚並支援原生 App opt-in |
 | D13 | `registration/result` / `authentication/result` 於 `audit_log.detail` 記 `originType`(`WEB`/`NATIVE_APP`) | origin-binding.md OB5，人類已拍板；事後鑑識登入來源，用既有 JSON 欄位無 schema 變更 |
 | D14 | 租戶 App 授權清單 v1 不新增 REST 端點，採人工 onboarding 寫 `tenant_app_bindings` | origin-binding.md OB6，人類已拍板；中小規模人工足夠、不影響 ceremony 驗證 |
+| D15 | 明文載明「終端使用者身分驗證由呼叫端（購物網站後端）負責、伺服器只以 `X-API-Key` 驗租戶身分」；凡帶 `externalUserId` 的端點，呼叫端須確保其等於本次請求的已驗證登入使用者，否則造成 IDOR（越權列出/撤銷他人裝置、替他人加掛攻擊者裝置＝帳號接管） | 澄清既有隱含責任邊界，非新架構決策、不改端點行為；避免串接團隊忽略此步造成 IDOR。見 §1.2.1 |
 | D-附 | 允許使用者撤銷至 0 個 FIDO 裝置（回退純帳密） | 對齊帳密永久保留、FIDO 為加掛選項 |
 
 > 複核通過後，建議將 D2/D3/D4/D5/D10 等影響架構的項目回填至 CLAUDE.md「已確認的關鍵架構決策」表，並將本合約交接 dev-engineer 進入實作。D12/D13/D14 已由人類拍板（origin-binding.md OB1/OB4/OB5/OB6），對應 `tenant_app_bindings` 表已定案於 db-schema.md 第 9 節。
