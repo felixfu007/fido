@@ -11,6 +11,7 @@
 | RP ID | 購物網站網域 |
 | 身分權威來源 | 購物網站既有帳密系統；FIDO 為加掛選項，帳密永久保留（不可單獨用 FIDO 登入取代帳密救援） |
 | FIDO 驗證 APP 角色 | 自訂 Android `CredentialProviderService`，掛載於系統 Credential Manager（非獨立 APP 跳轉、非推播） |
+| FIDO 驗證 APP 啟動器畫面 | `prod` flavor 保留**一個**最小化「設定/狀態」啟動器 Activity（Option B）。範圍嚴格限定：顯示 provider 是否已在系統啟用、一顆深連結進入系統 credential-provider 設定的按鈕、版本/客服/隱私（個資法）文字。**嚴禁**在此畫面內做任何登入/註冊 ceremony 或裝置列表/撤銷 UI——那會使其退化為 `非獨立 APP 跳轉` 決策所禁止的並行認證/管理路徑。ceremony 一律仍走 Credential Manager（由系統以 PendingIntent 隱式啟動 `CreatePasskeyActivity`/`GetPasskeyActivity`）。詳見下方「啟動器畫面決策」 |
 | 支援裝置 | 僅 Android 14+；不支援舊版 Android，第一版不支援 iOS |
 | 金鑰保護 | 強制要求 TEE/StrongBox 硬體安全區，不通過則拒絕註冊；驗證 Android Key Attestation 憑證鏈 |
 | 多裝置 | 允許使用者註冊多台裝置，提供管理介面 |
@@ -49,11 +50,25 @@ Android Credential Provider 技術驗證 PoC 的 10 項驗證項目已具體定�
 
 `fido-server` 與 `shopping-site-reference` 之間已完成**真實跨行程端對端整合驗證**（qa-engineer 執行，人工複核 log 與 git 狀態）：兩個服務各自以獨立 JVM 啟動（非單一測試行程內的 `MockMvc`/`@SpringBootTest`），以真實 HTTP 走完「註冊（真實 StrongBox 等級 android-key attestation 憑證鏈+簽章）→ 裝置落庫確認 → 登入（真實 assertion 簽章）→ session JWT 簽發 → shopping-site-reference 端真實打 JWKS 端點驗證簽章並建立 SHOP_SESSION → 裝置列表/撤銷代理 → IDOR 反例（夾帶他人 externalUserId 應回 403 EXTERNAL_USER_ID_MISMATCH）」全流程，共 13 項檢查全數通過，證據與重現腳本見 `fido-server/src/test/java/com/fido/server/e2e/CrossProcessE2EManualRunner.java`（手動執行，未掛進 `mvn test`/CI）。Android Credential Provider 端因本機環境無已連接的模擬器/實機，此輪不含在範圍內，其結果仍以既有的條件式通過 PoC 紀錄為準。
 
+### 啟動器畫面決策（`android-credential-provider` prod flavor 是否需要 launcher UI）
+
+PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一帶 `MAIN`/`LAUNCHER` 的元件）隔離到 `poc` flavor 後，`prod` flavor 變成**零啟動器 Activity**——純背景 `CredentialProviderService`。此為移除 harness 的副作用而非刻意設計，遺留為開放問題，由 systems-analyst 分析、人類拍板。結論：
+
+- **三件事在既有架構下已明確不需要 app 端畫面**，headless 對它們是正確答案：
+  1. **註冊/登入 ceremony 都不需直接開啟 app**——新裝置第一次註冊與後續登入走同一條路：購物網站（瀏覽器頁面或其原生 App）呼叫 Credential Manager `createCredential`/`getCredential`，由系統以 PendingIntent 隱式啟動 `CreatePasskeyActivity`/`GetPasskeyActivity`（見 `CreatePasskeyActivity.kt` 以 `PendingIntentHandler.retrieveProviderCreateCredentialRequest` 取請求），程式碼中沒有任何「使用者主動開 app 開始註冊」的路徑。
+  2. **`多裝置…提供管理介面`需求已被雙重滿足**：系統 Settings → 密碼/憑證提供者頁面（任何 `CredentialProviderService` 免費取得）＋ 購物網站自家的 `DeviceProxyController`（`/shop/api/fido/devices` list/revoke，經購物網站已驗證 session 代理）。Android app **不需**自建裝置列表/撤銷 UI。
+  3. **「目前使用哪個身分」指示器不適用**：本 app 不持有任何帳號/登入狀態，只依 `rpId` 存放 platform credential，無可顯示內容。
+
+- **唯一未被既有決策決定的開放判斷點是「首次啟用 provider ＋ app 可被發現性」**：Android 14 新裝的 `CredentialProviderService` 不會自動啟用，使用者須到系統設定手動開啟；零啟動器時 app 不在 app drawer 出現，安裝後無處可點、無法深連結到設定、無法顯示「是否已啟用」。人類拍板採 **Option B**：保留**一個**最小「設定/狀態」啟動器 Activity（啟用狀態顯示＋深連結進系統設定的按鈕＋版本/客服/隱私文字），與 `非獨立 APP 跳轉` 決策相容（該決策管的是認證流程不得改走獨立 app，而非禁止設定畫面）。**硬性範圍邊界**：此畫面永遠不得長成任何登入/註冊 ceremony 或裝置管理 UI，一旦如此即違反 `非獨立 APP 跳轉`。
+
+實作（把此 Activity 加進 `prod` 的 `src/main/AndroidManifest.xml` 並建畫面）由 dev-engineer 在其 OriginResolver/瀏覽器允許清單當前任務結束後另案承接，避免兩個 agent 同時建置同一 Gradle 專案；systems-analyst 本次僅落定決策文件、未動 Android 程式碼與 manifest。
+
 ## 待辦事項
 
 - `shopping-site-reference/`：`externalUserId` 目前保留為選填相容欄位（用於示範「夾帶不同值即拒絕」），評估是否要直接從請求 DTO 移除，讓這個攻擊面在型別層級就不存在
 - `shopping-site-reference/`：尚未實作 CSRF 防護（狀態變更端點僅靠 `SameSite=Lax` cookie），示範範例是否要一併補上正確模式待評估
 - `shopping-site-reference/`：session cookie 目前 `secure=false`（方便本機 HTTP 測試），正式部署（全站 TLS）需要改為 `true`
+- `android-credential-provider/`（dev-engineer 待接）：依「啟動器畫面決策」的 Option B，在 `prod` flavor 的 `src/main/AndroidManifest.xml` 新增一個最小「設定/狀態」啟動器 Activity 並建畫面（啟用狀態＋深連結系統設定按鈕＋版本/客服/隱私文字）；嚴守範圍邊界，不得含任何 ceremony 或裝置管理 UI。待其 OriginResolver/瀏覽器允許清單任務結束後另案進行
 
 ## 團隊分工（Claude Code Subagents）
 
