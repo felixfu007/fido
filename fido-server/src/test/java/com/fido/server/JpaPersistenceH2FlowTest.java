@@ -9,6 +9,8 @@ import com.fido.server.domain.BoundDevice;
 import com.fido.server.domain.FidoCredential;
 import com.fido.server.domain.FidoUserRef;
 import com.fido.server.domain.Tenant;
+import com.fido.server.domain.TenantAppBinding;
+import com.fido.server.domain.enums.AppBindingRevokedReason;
 import com.fido.server.domain.enums.AuditOutcome;
 import com.fido.server.domain.enums.CeremonyType;
 import com.fido.server.domain.enums.ChallengeStatus;
@@ -21,12 +23,14 @@ import com.fido.server.repository.AuthChallengeRepository;
 import com.fido.server.repository.BoundDeviceRepository;
 import com.fido.server.repository.FidoCredentialRepository;
 import com.fido.server.repository.FidoUserRefRepository;
+import com.fido.server.repository.TenantAppBindingRepository;
 import com.fido.server.repository.TenantRepository;
 import com.fido.server.repository.jpa.JpaAuditLogRepository;
 import com.fido.server.repository.jpa.JpaAuthChallengeRepository;
 import com.fido.server.repository.jpa.JpaBoundDeviceRepository;
 import com.fido.server.repository.jpa.JpaFidoCredentialRepository;
 import com.fido.server.repository.jpa.JpaFidoUserRefRepository;
+import com.fido.server.repository.jpa.JpaTenantAppBindingRepository;
 import com.fido.server.repository.jpa.JpaTenantRepository;
 import com.fido.server.testsupport.TestKeyAttestationFixtures;
 import com.fido.server.testsupport.WebAuthnCeremonyFixtures;
@@ -108,6 +112,9 @@ class JpaPersistenceH2FlowTest {
 
     @Autowired
     private JpaAuditLogRepository jpaAuditLogRepository;
+
+    @Autowired
+    private JpaTenantAppBindingRepository jpaTenantAppBindingRepository;
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final ObjectMapper cborMapper = new ObjectMapper(new CBORFactory());
@@ -420,6 +427,78 @@ class JpaPersistenceH2FlowTest {
                 savedTenant.getTenantId(), savedUserRef.getUserRefId(), 10);
         assertThat(eventsForUser).hasSize(1);
         assertThat(eventsForUser.get(0).getEventType()).isEqualTo("REG_SUCCESS");
+    }
+
+    /**
+     * 第七張表 {@code tenant_app_bindings}（db-schema.md 第 9 節 / DB17，origin-binding.md OB3）：
+     * 直接對 {@link JpaTenantAppBindingRepository}（此時是真正的 JPA 實作）save + 查詢，證明
+     * 能存取本表，且 {@code findByTenantIdAndStatus} 能正確地只挑出 {@code ACTIVE} 列（不含
+     * {@code REVOKED} 列），這是 {@code OriginValidator} 建構 app origin 允許清單時依賴的查詢。
+     */
+    @Test
+    void tenantAppBindingsSupportSaveAndActiveStatusQuery() {
+        TenantAppBindingRepository appBindingRepository = jpaTenantAppBindingRepository;
+
+        Tenant tenant = new Tenant();
+        tenant.setName("App Binding Shop");
+        tenant.setRpId("appbind-" + UUID.randomUUID() + ".example.com");
+        tenant.setExpectedOrigin("[\"https://appbind.example.com\"]");
+        tenant.setApiKeyHash(WebAuthnCeremonyFixtures.randomBytes(32));
+        tenant.setApiKeyPrefix("ab_prefix1");
+        tenant.setStatus(TenantStatus.ACTIVE);
+        tenant.setRateLimitTps(100);
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        tenant.setCreatedAt(now);
+        tenant.setUpdatedAt(now);
+        Tenant savedTenant = jpaTenantRepository.save(tenant);
+        assertThat(savedTenant.getTenantId()).isNotNull();
+
+        byte[] activeFingerprint = WebAuthnCeremonyFixtures.randomBytes(32);
+        TenantAppBinding activeBinding = new TenantAppBinding();
+        activeBinding.setTenantId(savedTenant.getTenantId());
+        activeBinding.setPackageName("com.shop.example");
+        activeBinding.setSha256CertFingerprint(activeFingerprint);
+        activeBinding.setApkKeyHashOrigin("android:apk-key-hash:" + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(activeFingerprint));
+        activeBinding.setLabel("正式版 App");
+        activeBinding.setStatus(RecordStatus.ACTIVE);
+        activeBinding.setCreatedAt(now);
+        activeBinding.setUpdatedAt(now);
+        TenantAppBinding savedActiveBinding = appBindingRepository.save(activeBinding);
+        assertThat(savedActiveBinding.getAppBindingPk()).isNotNull();
+        assertThat(savedActiveBinding.getBindingUid()).isNotNull();
+
+        byte[] revokedFingerprint = WebAuthnCeremonyFixtures.randomBytes(32);
+        TenantAppBinding revokedBinding = new TenantAppBinding();
+        revokedBinding.setTenantId(savedTenant.getTenantId());
+        revokedBinding.setPackageName("com.shop.example.test");
+        revokedBinding.setSha256CertFingerprint(revokedFingerprint);
+        revokedBinding.setApkKeyHashOrigin("android:apk-key-hash:" + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(revokedFingerprint));
+        revokedBinding.setLabel("測試簽章（已輪替）");
+        revokedBinding.setStatus(RecordStatus.REVOKED);
+        revokedBinding.setRevokedAt(now);
+        revokedBinding.setRevokedReason(AppBindingRevokedReason.KEY_ROTATION);
+        revokedBinding.setCreatedAt(now);
+        revokedBinding.setUpdatedAt(now);
+        appBindingRepository.save(revokedBinding);
+
+        // 直接繞過 OriginValidator，用 JPA repository 確認能存取本表且欄位 round-trip 正確。
+        Optional<TenantAppBinding> reloadedActive = jpaTenantAppBindingRepository.findByBindingUid(
+                savedActiveBinding.getBindingUid());
+        assertThat(reloadedActive).isPresent();
+        assertThat(reloadedActive.get().getPackageName()).isEqualTo("com.shop.example");
+        assertThat(reloadedActive.get().getSha256CertFingerprint()).isEqualTo(activeFingerprint);
+        assertThat(reloadedActive.get().getApkKeyHashOrigin()).isEqualTo(savedActiveBinding.getApkKeyHashOrigin());
+
+        // OriginValidator 依賴的查詢：只回傳該租戶 status=ACTIVE 的列，REVOKED 列應被排除。
+        var activeBindings = appBindingRepository.findByTenantIdAndStatus(savedTenant.getTenantId(), RecordStatus.ACTIVE);
+        assertThat(activeBindings).hasSize(1);
+        assertThat(activeBindings.get(0).getApkKeyHashOrigin()).isEqualTo(savedActiveBinding.getApkKeyHashOrigin());
+
+        var revokedBindings = appBindingRepository.findByTenantIdAndStatus(savedTenant.getTenantId(), RecordStatus.REVOKED);
+        assertThat(revokedBindings).hasSize(1);
+        assertThat(revokedBindings.get(0).getRevokedReason()).isEqualTo(AppBindingRevokedReason.KEY_ROTATION);
     }
 
     private void submitAssertion(byte[] credentialId, PrivateKey credentialPrivateKey, String ceremonyId,

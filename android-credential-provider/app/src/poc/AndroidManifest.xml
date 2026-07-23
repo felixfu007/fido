@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        【PoC 專用測試 harness，非產品程式碼】只存在於 `poc` build flavor（見
+        app/build.gradle.kts productFlavors、harness/HarnessActivity.kt / FidoServerClient.kt
+        檔頭說明）。模擬「購物網站前端 + 後端」，觸發
+        CredentialManager.createCredential()/getCredential()，並直接呼叫 fido-server REST
+        端點（真實產品中 App 不會這麼做，見 api-contract.md 前言與
+        docs/android-poc-checklist.md 附錄 A-2）。
+
+        Gradle manifest merger 只在建置 `poc` flavor 時，才會把本檔案與
+        src/main/AndroidManifest.xml 合併；建置 `prod` flavor 時本檔案完全不參與合併，
+        最終 `prod` APK 的 manifest 不會出現這個 activity 節點。
+    -->
+    <application>
+        <activity
+            android:name=".harness.HarnessActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FidoCredentialProvider">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

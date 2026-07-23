@@ -57,20 +57,13 @@
             android:excludeFromRecents="true" />
 
         <!--
-            【PoC 專用測試 harness，非產品程式碼】模擬「購物網站前端 + 後端」，觸發
-            CredentialManager.createCredential()/getCredential()，並直接呼叫 fido-server REST
-            端點（真實產品中 App 不會這麼做，見 api-contract.md 前言與
-            docs/android-poc-checklist.md 附錄 A-2）。
+            PoC 專用測試 harness（HarnessActivity）**不在**本檔案宣告。它只存在於 `poc` build
+            flavor 的 src/poc/AndroidManifest.xml（Gradle manifest merger 會依當下建置的
+            flavor 決定要不要併入），`prod` flavor 完全不含這個 activity 節點，也不含對應原始碼
+            （見 app/build.gradle.kts productFlavors、harness/HarnessActivity.kt 檔頭說明、
+            任務回報「harness 分離」）。
+
         -->
-        <activity
-            android:name=".harness.HarnessActivity"
-            android:exported="true"
-            android:theme="@style/Theme.FidoCredentialProvider">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
 
     </application>
 </manifest>

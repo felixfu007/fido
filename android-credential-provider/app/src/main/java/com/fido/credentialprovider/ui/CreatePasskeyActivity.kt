@@ -13,13 +13,13 @@ import androidx.credentials.CreatePublicKeyCredentialRequest
 import androidx.credentials.CreatePublicKeyCredentialResponse
 import androidx.credentials.exceptions.CreateCredentialUnknownException
 import androidx.credentials.provider.PendingIntentHandler
-import com.fido.credentialprovider.PocConfig
 import com.fido.credentialprovider.keystore.HardwareKeyManager
 import com.fido.credentialprovider.keystore.LocalCredentialStore
 import com.fido.credentialprovider.webauthn.AttestationObjectBuilder
 import com.fido.credentialprovider.webauthn.AuthenticatorDataBuilder
 import com.fido.credentialprovider.webauthn.ClientDataBuilder
 import com.fido.credentialprovider.webauthn.CoseKeyEncoder
+import com.fido.credentialprovider.webauthn.OriginResolver
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.Signature
@@ -62,9 +62,30 @@ class CreatePasskeyActivity : AppCompatActivity() {
             return
         }
 
+        // docs/origin-binding.md 第 6 節：origin 一律由呼叫方 CallingAppInfo 動態解析與驗證，
+        // 不接受任何寫死值；解析失敗（含冒充受信任瀏覽器）一律直接拒絕，不觸發使用者驗證/
+        // 產生任何金鑰或簽章（見該文件 6.3 拒絕條件）。
+        val originDecision = OriginResolver.resolveTrustedOrigin(providerRequest?.callingAppInfo)
+        val resolvedOrigin = when (originDecision) {
+            is OriginResolver.OriginDecision.Reject -> {
+                Log.w(
+                    TAG,
+                    "origin 解析被拒絕：${originDecision.reason}（呼叫方 package=" +
+                        "${providerRequest?.callingAppInfo?.packageName}）",
+                )
+                finishWithError("ORIGIN_REJECTED: ${originDecision.reason}")
+                return
+            }
+            is OriginResolver.OriginDecision.UseOrigin -> originDecision
+        }
+        Log.i(
+            TAG,
+            "origin 解析完成：sourceType=${resolvedOrigin.sourceType} origin=${resolvedOrigin.origin}",
+        )
+
         requireUserVerification(
             title = "註冊 FIDO 硬體金鑰",
-            onSuccess = { performRegistration(parsed) },
+            onSuccess = { performRegistration(parsed, resolvedOrigin.origin) },
             onFailure = { reason -> finishWithError("User verification failed: $reason") },
         )
     }
@@ -73,12 +94,15 @@ class CreatePasskeyActivity : AppCompatActivity() {
 
     private fun parseCreationOptions(requestJson: String): CreationOptions {
         val obj = JSONObject(requestJson)
-        val rpId = obj.optJSONObject("rp")?.optString("id") ?: PocConfig.RP_ID
+        // docs/origin-binding.md 6.5：rpId 一律以 requestJson 的 rp.id 為準，不 fallback 到任何
+        // 寫死值；缺漏視為請求格式錯誤（由呼叫端的 try/catch 轉成 finishWithError）。
+        val rpId = obj.optJSONObject("rp")?.optString("id")?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("requestJson missing rp.id")
         val challenge = obj.getString("challenge")
         return CreationOptions(rpId = rpId, challengeB64Url = challenge)
     }
 
-    private fun performRegistration(options: CreationOptions) {
+    private fun performRegistration(options: CreationOptions, origin: String) {
         Thread {
             try {
                 val credentialIdB64Url = LocalCredentialStore.randomCredentialIdBase64Url()
@@ -115,7 +139,7 @@ class CreatePasskeyActivity : AppCompatActivity() {
                         val clientDataJson = ClientDataBuilder.build(
                             type = "webauthn.create",
                             challengeBase64Url = options.challengeB64Url,
-                            origin = PocConfig.ORIGIN,
+                            origin = origin,
                         )
                         val clientDataHash = sha256(clientDataJson)
 

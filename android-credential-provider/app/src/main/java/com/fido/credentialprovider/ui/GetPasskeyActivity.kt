@@ -13,10 +13,10 @@ import androidx.credentials.GetPublicKeyCredentialOption
 import androidx.credentials.PublicKeyCredential
 import androidx.credentials.exceptions.GetCredentialUnknownException
 import androidx.credentials.provider.PendingIntentHandler
-import com.fido.credentialprovider.PocConfig
 import com.fido.credentialprovider.keystore.LocalCredentialStore
 import com.fido.credentialprovider.webauthn.AuthenticatorDataBuilder
 import com.fido.credentialprovider.webauthn.ClientDataBuilder
+import com.fido.credentialprovider.webauthn.OriginResolver
 import org.json.JSONObject
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -67,16 +67,46 @@ class GetPasskeyActivity : AppCompatActivity() {
             return
         }
 
-        val rpId = LocalCredentialStore.getRpId(this, credentialIdB64Url) ?: PocConfig.RP_ID
+        // docs/origin-binding.md 6.5：不 fallback 到任何寫死值。rpId 的權威來源是本機
+        // LocalCredentialStore 於註冊當下記錄的值（該值本身已來自 requestJson 的 rp.id，
+        // 見 CreatePasskeyActivity.parseCreationOptions）；若查無紀錄視為資料完整性錯誤，直接
+        // 拒絕，而非靜默套用某個固定 rpId（那會對其他租戶產生錯誤綁定的 rpIdHash）。
+        val rpId = LocalCredentialStore.getRpId(this, credentialIdB64Url)
+        if (rpId == null) {
+            Log.e(TAG, "找不到 credentialId=$credentialIdB64Url 對應的 rpId（本機憑證紀錄缺失）。")
+            finishWithError("Missing stored rpId for this credential")
+            return
+        }
+
+        // docs/origin-binding.md 第 6 節：origin 一律由呼叫方 CallingAppInfo 動態解析與驗證，
+        // 不接受任何寫死值；解析失敗（含冒充受信任瀏覽器）一律直接拒絕，不觸發使用者驗證/
+        // 產生任何簽章（見該文件 6.3 拒絕條件）。
+        val originDecision = OriginResolver.resolveTrustedOrigin(providerRequest?.callingAppInfo)
+        val resolvedOrigin = when (originDecision) {
+            is OriginResolver.OriginDecision.Reject -> {
+                Log.w(
+                    TAG,
+                    "origin 解析被拒絕：${originDecision.reason}（呼叫方 package=" +
+                        "${providerRequest?.callingAppInfo?.packageName}）",
+                )
+                finishWithError("ORIGIN_REJECTED: ${originDecision.reason}")
+                return
+            }
+            is OriginResolver.OriginDecision.UseOrigin -> originDecision
+        }
+        Log.i(
+            TAG,
+            "origin 解析完成：sourceType=${resolvedOrigin.sourceType} origin=${resolvedOrigin.origin}",
+        )
 
         requireUserVerification(
             title = "使用 FIDO 硬體金鑰登入",
-            onSuccess = { performAssertion(credentialIdB64Url, rpId, challengeB64Url) },
+            onSuccess = { performAssertion(credentialIdB64Url, rpId, challengeB64Url, resolvedOrigin.origin) },
             onFailure = { reason -> finishWithError("User verification failed: $reason") },
         )
     }
 
-    private fun performAssertion(credentialIdB64Url: String, rpId: String, challengeB64Url: String) {
+    private fun performAssertion(credentialIdB64Url: String, rpId: String, challengeB64Url: String, origin: String) {
         Thread {
             try {
                 val alias = LocalCredentialStore.aliasFor(credentialIdB64Url)
@@ -99,7 +129,7 @@ class GetPasskeyActivity : AppCompatActivity() {
                 val clientDataJson = ClientDataBuilder.build(
                     type = "webauthn.get",
                     challengeBase64Url = challengeB64Url,
-                    origin = PocConfig.ORIGIN,
+                    origin = origin,
                 )
                 val clientDataHash = sha256(clientDataJson)
 

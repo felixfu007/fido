@@ -163,9 +163,11 @@ public class AuthenticationService {
             recordFailure(tenant, userRef, "challenge mismatch");
             throw new ApiException(ErrorCode.ASSERTION_INVALID, "clientDataJSON.challenge does not match issued challenge.");
         }
-        if (!originValidator.isAllowed(clientData.origin(), tenant.getExpectedOrigin())) {
-            recordFailure(tenant, userRef, "origin mismatch: " + clientData.origin());
-            throw new ApiException(ErrorCode.RP_ID_MISMATCH, "Origin does not match tenant's expected origin.");
+        OriginValidator.OriginCheckResult originCheck = originValidator.check(clientData.origin(), tenant);
+        if (!originCheck.allowed()) {
+            recordFailure(tenant, userRef, "origin not allowed: " + clientData.origin());
+            throw new ApiException(ErrorCode.ORIGIN_NOT_ALLOWED,
+                    "Origin is not in tenant's allowed origin list.");
         }
 
         byte[] authDataRaw = decodeB64Url(request.credential().response().authenticatorData(), "authenticatorData");
@@ -236,7 +238,7 @@ public class AuthenticationService {
                 B64URL.encodeToString(credential.getCredentialId()), device.getDeviceId().toString());
 
         auditService.record(tenant.getTenantId(), userRef.getUserRefId(), device.getDevicePk(), "AUTH_SUCCESS",
-                AuditOutcome.SUCCESS, Map.of("jti", issued.jti()));
+                AuditOutcome.SUCCESS, Map.of("jti", issued.jti(), "originType", originCheck.originType().name()));
 
         challengeService.consume(challenge);
 

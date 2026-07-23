@@ -162,9 +162,11 @@ public class RegistrationService {
             recordFailure(tenant, userRef, "REG_FAIL", "challenge mismatch");
             throw new ApiException(ErrorCode.ATTESTATION_INVALID, "clientDataJSON.challenge does not match issued challenge.");
         }
-        if (!originValidator.isAllowed(clientData.origin(), tenant.getExpectedOrigin())) {
-            recordFailure(tenant, userRef, "REG_FAIL", "origin mismatch: " + clientData.origin());
-            throw new ApiException(ErrorCode.RP_ID_MISMATCH, "Origin does not match tenant's expected origin.");
+        OriginValidator.OriginCheckResult originCheck = originValidator.check(clientData.origin(), tenant);
+        if (!originCheck.allowed()) {
+            recordFailure(tenant, userRef, "REG_FAIL", "origin not allowed: " + clientData.origin());
+            throw new ApiException(ErrorCode.ORIGIN_NOT_ALLOWED,
+                    "Origin is not in tenant's allowed origin list.");
         }
 
         ParsedAttestationObject parsed;
@@ -245,7 +247,8 @@ public class RegistrationService {
 
         auditService.record(tenant.getTenantId(), userRef.getUserRefId(), device.getDevicePk(), "REG_SUCCESS",
                 AuditOutcome.SUCCESS, Map.of("deviceId", device.getDeviceId().toString(),
-                        "securityLevel", chainResult.securityLevel().name()));
+                        "securityLevel", chainResult.securityLevel().name(),
+                        "originType", originCheck.originType().name()));
 
         DeviceInfo deviceInfo = new DeviceInfo(
                 device.getDeviceName(),

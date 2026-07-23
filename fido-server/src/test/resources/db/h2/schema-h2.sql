@@ -32,9 +32,12 @@
 --      這些索引只影響查詢效能，不影響資料正確性/約束語意，ddl-auto=validate 也不會檢查
 --      它們是否存在；為了讓本檔維持精簡、專注在「JPA mapping 是否正確」這個目的，予以省略。
 --      正式 SQL Server 部署仍以 infra/sql/003_create_indexes.sql 為準。
+--   5. 新增第七張表 tenant_app_bindings（docs/db-schema.md 第 9 節 / DB17，origin 綁定架構
+--      OB3 定案後新增）：逐字對齊 infra/sql/002_create_tables.sql 該表 DDL，除上述第 1/4 點
+--      （省略 DEFAULT 子句、省略非唯一次要索引 IX_appbind_tenant_status）外，無額外差異。
 --
--- 除上述 4 點外，資料表/欄位/型別長度/NOT NULL/PK/UNIQUE/CHECK/FK 均逐字對齊
--- infra/sql/002_create_tables.sql（= docs/db-schema.md 第 3-8 節權威 DDL）。
+-- 除上述 5 點外，資料表/欄位/型別長度/NOT NULL/PK/UNIQUE/CHECK/FK 均逐字對齊
+-- infra/sql/002_create_tables.sql（= docs/db-schema.md 第 3-9 節權威 DDL）。
 --
 -- 【重要】本檔逐字寫小寫的表名/欄位名（對齊 docs/db-schema.md），但實際連線字串
 -- （application-h2.yml）刻意不加 DATABASE_TO_UPPER=false —— 也就是說 H2 仍會依其預設行為
@@ -164,4 +167,28 @@ CREATE TABLE audit_log (
     CONSTRAINT FK_audit_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id),
     CONSTRAINT FK_audit_userref FOREIGN KEY (user_ref_id) REFERENCES fido_user_ref(user_ref_id),
     CONSTRAINT CK_audit_outcome CHECK (outcome IN ('SUCCESS','FAILURE'))
+);
+
+-- 第七張表：tenant_app_bindings（docs/db-schema.md 第 9 節 / DB17，origin-binding.md OB3）。
+-- 原生 App 情境（opt-in）下，租戶授權「代表其網域發起 WebAuthn」的 Android App 簽章指紋登錄；
+-- OriginValidator 讀取本表 status=ACTIVE 列的 apk_key_hash_origin 併入該租戶的 origin 允許清單。
+CREATE TABLE tenant_app_bindings (
+    app_binding_pk          BIGINT IDENTITY(1,1) NOT NULL,
+    binding_uid              UNIQUEIDENTIFIER NOT NULL,
+    tenant_id                BIGINT NOT NULL,
+    package_name             NVARCHAR(255) NOT NULL,
+    sha256_cert_fingerprint  VARBINARY(32) NOT NULL,
+    apk_key_hash_origin      NVARCHAR(120) NOT NULL,
+    label                    NVARCHAR(100) NULL,
+    status                   NVARCHAR(20) NOT NULL,
+    revoked_at               DATETIME2(3) NULL,
+    revoked_reason           NVARCHAR(50) NULL,
+    created_at               DATETIME2(3) NOT NULL,
+    updated_at               DATETIME2(3) NOT NULL,
+    CONSTRAINT PK_tenant_app_bindings PRIMARY KEY (app_binding_pk),
+    CONSTRAINT UQ_appbind_uid UNIQUE (binding_uid),
+    CONSTRAINT UQ_appbind_tenant_pkg_fp UNIQUE (tenant_id, package_name, sha256_cert_fingerprint),
+    CONSTRAINT FK_appbind_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id),
+    CONSTRAINT CK_appbind_status CHECK (status IN ('ACTIVE','REVOKED')),
+    CONSTRAINT CK_appbind_revreason CHECK (revoked_reason IN ('ADMIN','KEY_ROTATION','SECURITY'))
 );

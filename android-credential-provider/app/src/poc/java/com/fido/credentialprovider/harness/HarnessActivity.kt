@@ -17,9 +17,8 @@ import androidx.credentials.PublicKeyCredential
 import androidx.credentials.exceptions.CreateCredentialException
 import androidx.credentials.exceptions.GetCredentialException
 import androidx.lifecycle.lifecycleScope
-import com.fido.credentialprovider.PocConfig
 import com.fido.credentialprovider.R
-import com.fido.credentialprovider.keystore.HardwareKeyManager
+import com.fido.credentialprovider.keystore.DiagnosticsGate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -59,16 +58,17 @@ class HarnessActivity : AppCompatActivity() {
     }
 
     /**
-     * 【診斷用，非清單項目 2 的通過判定】切換 [HardwareKeyManager.diagnosticsAllowSoftwareKeyForPoCInspection]。
-     * 開啟後下一次註冊會放行模擬器的軟體等級金鑰，僅用來取得真實 Android Keystore 簽發的
-     * attestation 憑證鏈，驗證清單項目 3（android-key CBOR 結構）在真實裝置輸出下是否可解析；
-     * 不代表、也不影響清單項目 2 的硬體閘門通過判定（該判定以此旗標關閉時的行為為準）。
+     * 【診斷用，非清單項目 2 的通過判定】切換 [DiagnosticsGate.allowSoftwareKeyForInspection]
+     * （`poc` flavor 專屬實作，見該檔案完整說明）。開啟後下一次註冊會放行模擬器的軟體等級金鑰，
+     * 僅用來取得真實 Android Keystore 簽發的 attestation 憑證鏈，驗證清單項目 3（android-key
+     * CBOR 結構）在真實裝置輸出下是否可解析；不代表、也不影響清單項目 2 的硬體閘門通過判定
+     * （該判定以此旗標關閉時的行為為準）。此開關只存在於 `poc` flavor 建置出的 APK；`prod`
+     * flavor 沒有本 Activity，也沒有任何管道能開啟對應旗標。
      */
     private fun toggleDiagnosticsMode() {
-        HardwareKeyManager.diagnosticsAllowSoftwareKeyForPoCInspection =
-            !HardwareKeyManager.diagnosticsAllowSoftwareKeyForPoCInspection
-        val state = HardwareKeyManager.diagnosticsAllowSoftwareKeyForPoCInspection
-        log("【診斷旗標】diagnosticsAllowSoftwareKeyForPoCInspection = $state" +
+        DiagnosticsGate.allowSoftwareKeyForInspection = !DiagnosticsGate.allowSoftwareKeyForInspection
+        val state = DiagnosticsGate.allowSoftwareKeyForInspection
+        log("【診斷旗標】DiagnosticsGate.allowSoftwareKeyForInspection = $state" +
             if (state) "（下一次註冊會放行軟體金鑰，僅供檢視真實 attestationObject，不代表硬體閘門通過）" else "")
         Toast.makeText(this, "診斷旗標：$state", Toast.LENGTH_SHORT).show()
     }
