@@ -2,6 +2,8 @@ package com.shop.reference.exception;
 
 import com.shop.reference.authentication.jwt.JwtValidationException;
 import com.shop.reference.fidoclient.FidoServerApiException;
+import com.shop.reference.session.ExternalUserIdMismatchException;
+import com.shop.reference.session.NotLoggedInException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -37,6 +39,20 @@ public class ShopExceptionHandler {
         }
         return ResponseEntity.status(ex.getStatus())
                 .body(ShopErrorResponse.of("FIDO_SERVER", ex.getErrorCode(), ex.getMessage(), details));
+    }
+
+    @ExceptionHandler(NotLoggedInException.class)
+    public ResponseEntity<ShopErrorResponse> handleNotLoggedIn(NotLoggedInException ex) {
+        log.info("未登入呼叫被拒絕：{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(ShopErrorResponse.of("SHOP_SESSION", "NOT_LOGGED_IN", ex.getMessage(), Map.of()));
+    }
+
+    @ExceptionHandler(ExternalUserIdMismatchException.class)
+    public ResponseEntity<ShopErrorResponse> handleExternalUserIdMismatch(ExternalUserIdMismatchException ex) {
+        log.warn("externalUserId 與登入 session 不一致，拒絕請求（疑似 IDOR 嘗試）：{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(ShopErrorResponse.of("SHOP_SESSION", "EXTERNAL_USER_ID_MISMATCH", ex.getMessage(), Map.of()));
     }
 
     @ExceptionHandler(JwtValidationException.class)

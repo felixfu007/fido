@@ -26,37 +26,61 @@
 </header>
 
 <main>
-  <section id="identity-section">
-    <h2>0. 模擬「已用帳密登入」的購物網站使用者</h2>
+  <section id="login-section">
+    <h2>0. 購物網站登入（示範用「假登入」）</h2>
     <p class="note">
-      對齊 CLAUDE.md：身分權威來源是購物網站既有帳密系統，FIDO 只是加掛選項。本範例沒有實作
-      真正的帳密登入，這裡直接輸入 <code>externalUserId</code> 代表「目前已登入的購物網站帳號」。
-      <strong>正式串接時，這個值必須改成從購物網站自己已驗證的登入 session 取得，不可信任前端輸入</strong>
-      （見 <code>RegistrationProxyController</code> / <code>DeviceProxyController</code> 的 Javadoc）。
+      對齊 CLAUDE.md：身分權威來源是購物網站既有帳密系統，FIDO 只是加掛選項；發起 FIDO 裝置註冊、
+      查看/撤銷裝置，前提都是「已經用帳密系統登入」。<strong>本頁沒有實作真正的帳密驗證</strong>
+      （不是本範例的重點）—— 下面按下「登入」時，只是呼叫一支示範用端點
+      <code>POST /shop/api/session/login-as</code>，帶入 externalUserId 就視為「已通過帳密驗證」，
+      直接核發購物網站自己的 <code>SHOP_SESSION</code> cookie。
+      <strong>正式串接時請把這一段整套換成你自己真正的帳密登入系統</strong>
+      （見 <code>DemoLoginController</code> 的 Javadoc）。
     </p>
-    <label>externalUserId：<input id="externalUserId" value="demo-user-001"></label>
-    <label>displayName：<input id="displayName" value="Demo User"></label>
+    <p class="note">
+      下面第 1、3 節（註冊 FIDO 裝置、裝置管理）都改成從這個登入 session 取得 externalUserId，
+      畫面上不會再出現讓你直接輸入 externalUserId 代表「目前已登入使用者」的欄位 —— 那正是本次
+      修正要杜絕的錯誤模式（IDOR）。
+    </p>
+    <label>externalUserId（僅供這支假登入端點使用）：<input id="loginExternalUserId" value="demo-user-001"></label>
+    <button id="btnLogin">登入</button>
+    <button id="btnLogout">登出</button>
+    <p>目前狀態：<span id="loginStatus">尚未登入</span></p>
+    <pre id="loginSessionLog" class="log"></pre>
   </section>
 
   <section id="registration-section">
     <h2>1. 註冊 FIDO 裝置（新增 Passkey）</h2>
+    <p class="note">
+      需要先完成上方「0. 購物網站登入」。這裡不再有 externalUserId 欄位 ——
+      <code>RegistrationProxyController</code> 一律從登入 session 取得，不接受呼叫端指定。
+    </p>
+    <label>displayName（Passkey 上顯示的名稱）：<input id="displayName" value="Demo User"></label>
     <label>裝置名稱：<input id="deviceLabel" value="我的裝置"></label>
     <button id="btnRegister">開始註冊</button>
     <pre id="registrationLog" class="log"></pre>
   </section>
 
-  <section id="login-section">
+  <section id="fido-login-section">
     <h2>2. 用 FIDO 登入</h2>
     <p class="note">
+      這是「用 FIDO 取代帳密登入」的流程，前提是尚未登入（或想改用另一個裝置登入）——
+      這裡輸入 externalUserId 是在告訴 fido-server「我宣稱是誰」，實際身分驗證由 WebAuthn
+      簽章完成，與上方第 0 節的登入 session 無關。留空則走 discoverable / usernameless 流程。
       登入成功後，購物網站後端會先驗證 fido-server 回傳的 session JWT（簽章 / iss / aud / exp /
-      jti），驗證通過才會建立購物網站自己的 <code>SHOP_SESSION</code> cookie。
+      jti），驗證通過才會建立購物網站自己的 <code>SHOP_SESSION</code> cookie（等同於完成第 0 節的登入）。
     </p>
-    <button id="btnLogin">開始登入</button>
+    <label>externalUserId（選填）：<input id="fidoLoginExternalUserId" value="demo-user-001"></label>
+    <button id="btnFidoLogin">開始登入</button>
     <pre id="loginLog" class="log"></pre>
   </section>
 
   <section id="device-section">
     <h2>3. 裝置管理</h2>
+    <p class="note">
+      需要先完成上方「0. 購物網站登入」（或透過第 2 節用 FIDO 登入）。只會列出/操作目前登入者
+      自己的裝置。
+    </p>
     <button id="btnListDevices">列出我的裝置</button>
     <table id="deviceTable">
       <thead>
