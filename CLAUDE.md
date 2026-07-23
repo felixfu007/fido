@@ -47,6 +47,8 @@ Android Credential Provider 技術驗證 PoC 的 10 項驗證項目已具體定�
 
 購物網站串接參考範例（`shopping-site-reference/`）已建立，示範註冊/登入/裝置管理三個代理流程，核心為 `FidoSessionJwtValidator`（不信任回應 `verified` 欄位，只信任自行驗證過的 session JWT）。過程中發現的 IDOR 缺口（`externalUserId` 未限定為呼叫端已驗證的登入使用者）已修復：範例現在一律從購物網站自己的登入 session 取得 `externalUserId`，並已將此責任邊界明文寫入 `docs/api-contract.md`（D15）。
 
+`fido-server` 與 `shopping-site-reference` 之間已完成**真實跨行程端對端整合驗證**（qa-engineer 執行，人工複核 log 與 git 狀態）：兩個服務各自以獨立 JVM 啟動（非單一測試行程內的 `MockMvc`/`@SpringBootTest`），以真實 HTTP 走完「註冊（真實 StrongBox 等級 android-key attestation 憑證鏈+簽章）→ 裝置落庫確認 → 登入（真實 assertion 簽章）→ session JWT 簽發 → shopping-site-reference 端真實打 JWKS 端點驗證簽章並建立 SHOP_SESSION → 裝置列表/撤銷代理 → IDOR 反例（夾帶他人 externalUserId 應回 403 EXTERNAL_USER_ID_MISMATCH）」全流程，共 13 項檢查全數通過，證據與重現腳本見 `fido-server/src/test/java/com/fido/server/e2e/CrossProcessE2EManualRunner.java`（手動執行，未掛進 `mvn test`/CI）。Android Credential Provider 端因本機環境無已連接的模擬器/實機，此輪不含在範圍內，其結果仍以既有的條件式通過 PoC 紀錄為準。
+
 ## 待辦事項
 
 - `shopping-site-reference/`：`externalUserId` 目前保留為選填相容欄位（用於示範「夾帶不同值即拒絕」），評估是否要直接從請求 DTO 移除，讓這個攻擊面在型別層級就不存在
