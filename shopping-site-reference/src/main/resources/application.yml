@@ -1,5 +1,7 @@
 server:
-  port: 8081
+  # 8081 在部分本機開發環境上會被其他無關服務長期佔用（例如曾實測撞上 macmnsvc.exe），
+  # 故專案預設一律改用 18081，不使用 8081，避免每個人各自本機碰撞、各自 override。
+  port: 18081
 
 spring:
   application:
