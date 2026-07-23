@@ -10,6 +10,22 @@ spring:
     default-property-inclusion: non_null
 
 # ---------------------------------------------------------------------------
+# 購物網站自己核發的 cookie（SHOP_SESSION 登入 session、XSRF-TOKEN CSRF double-submit
+# token，見 ShopSessionService / DemoLoginController / AuthenticationProxyController /
+# com.shop.reference.security.CsrfCookieFilter）的安全屬性。
+#
+# checked-in 預設值必須是正式部署（全站 TLS，見 CLAUDE.md 傳輸安全）正確的值：true。
+# 本機沒有 TLS、直接用 http://localhost 開發測試時，Secure cookie 不會被瀏覽器 / 標準
+# HTTP client 在 http 連線下送出（會導致登入 session 與 CSRF 防護都無法運作），此時請
+# 明確 opt-out --用 `--spring.profiles.active=local-http` 啟用 application-local-http.yml
+# （見該檔案），而不是回頭改這裡的預設值。
+# ---------------------------------------------------------------------------
+shop:
+  session:
+    cookie:
+      secure: true
+
+# ---------------------------------------------------------------------------
 # 對接 fido-server：直接沿用 fido-server 開發環境的種子租戶（DevDataSeeder，
 # fido.dev-seed.*，見 fido-server/src/main/resources/application.yml），本專案不建立
 # 任何租戶邏輯（依任務範圍界定）。

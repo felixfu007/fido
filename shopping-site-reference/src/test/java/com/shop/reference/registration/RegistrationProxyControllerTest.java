@@ -24,6 +24,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+import static com.shop.reference.testsupport.CsrfTestSupport.csrf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -93,6 +94,7 @@ class RegistrationProxyControllerTest {
         mockNotLoggedIn();
 
         mockMvc.perform(post("/shop/api/fido/registration/options")
+                        .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 { "displayName": "Demo", "deviceLabel": "我的裝置" }
@@ -119,6 +121,7 @@ class RegistrationProxyControllerTest {
 
         // 請求 body 完全不帶 externalUserId（前端已不再讓使用者輸入這個欄位）。
         mockMvc.perform(post("/shop/api/fido/registration/options")
+                        .with(csrf())
                         .cookie(sessionCookie())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -134,6 +137,7 @@ class RegistrationProxyControllerTest {
         mockLoggedIn();
 
         mockMvc.perform(post("/shop/api/fido/registration/options")
+                        .with(csrf())
                         .cookie(sessionCookie())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -155,6 +159,7 @@ class RegistrationProxyControllerTest {
                 "我的裝置"));
 
         mockMvc.perform(post("/shop/api/fido/registration/result")
+                        .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnauthorized())
@@ -178,6 +183,7 @@ class RegistrationProxyControllerTest {
                 "我的裝置"));
 
         mockMvc.perform(post("/shop/api/fido/registration/result")
+                        .with(csrf())
                         .cookie(sessionCookie())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
@@ -198,6 +204,7 @@ class RegistrationProxyControllerTest {
                 "我的裝置"));
 
         mockMvc.perform(post("/shop/api/fido/registration/result")
+                        .with(csrf())
                         .cookie(sessionCookie())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
@@ -221,6 +228,7 @@ class RegistrationProxyControllerTest {
                 null));
 
         mockMvc.perform(post("/shop/api/fido/registration/result")
+                        .with(csrf())
                         .cookie(sessionCookie())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))

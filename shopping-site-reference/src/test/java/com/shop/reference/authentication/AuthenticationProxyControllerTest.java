@@ -18,6 +18,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
 
+import static com.shop.reference.testsupport.CsrfTestSupport.csrf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
@@ -75,6 +76,7 @@ class AuthenticationProxyControllerTest {
         when(shopSessionService.createSession("u-10023", "dev-xyz", "cred-abc")).thenReturn(shopSession);
 
         mockMvc.perform(post("/shop/api/fido/authentication/result")
+                        .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody()))
                 .andExpect(status().isOk())
@@ -82,7 +84,10 @@ class AuthenticationProxyControllerTest {
                 .andExpect(jsonPath("$.externalUserId").value("u-10023"))
                 .andExpect(cookie().exists(ShopSessionService.COOKIE_NAME))
                 .andExpect(cookie().value(ShopSessionService.COOKIE_NAME, "shopsess_1"))
-                .andExpect(cookie().httpOnly(ShopSessionService.COOKIE_NAME, true));
+                .andExpect(cookie().httpOnly(ShopSessionService.COOKIE_NAME, true))
+                // 對齊「session cookie secure 預設值」待辦事項：checked-in 預設值必須是
+                // secure=true（正式部署全站 TLS 的正確值），見 application.yml。
+                .andExpect(cookie().secure(ShopSessionService.COOKIE_NAME, true));
     }
 
     @Test
@@ -95,6 +100,7 @@ class AuthenticationProxyControllerTest {
                 .thenThrow(new JwtValidationException("SIGNATURE_OR_CLAIM_INVALID", "簽章驗證失敗"));
 
         mockMvc.perform(post("/shop/api/fido/authentication/result")
+                        .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody()))
                 .andExpect(status().isUnauthorized())
@@ -113,6 +119,7 @@ class AuthenticationProxyControllerTest {
         when(fidoServerClient.authenticationResult(any())).thenReturn(fidoResponse);
 
         mockMvc.perform(post("/shop/api/fido/authentication/result")
+                        .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody()))
                 .andExpect(status().isUnauthorized())

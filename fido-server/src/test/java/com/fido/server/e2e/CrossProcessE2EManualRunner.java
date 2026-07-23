@@ -10,6 +10,7 @@ import java.io.File;
 import java.io.IOException;
 import java.net.CookieManager;
 import java.net.CookiePolicy;
+import java.net.HttpCookie;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -108,7 +109,14 @@ public final class CrossProcessE2EManualRunner {
 
             shopProcess = startProcess("shopping-site-reference", shopDir,
                     List.of("java", "-jar", shopJar.toString(),
-                            "--server.port=18081"),
+                            "--server.port=18081",
+                            // shop.session.cookie.secure 預設 true（見 CLAUDE.md 待辦事項「session
+                            // cookie secure 預設值」修復後的 application.yml），但本 harness 是以
+                            // 純 http://localhost 跑兩個行程（無 TLS 反向代理）；Secure cookie 在
+                            // http 連線下不會被送出，會讓 SHOP_SESSION 登入 session 與新加入的
+                            // XSRF-TOKEN CSRF double-submit cookie 都失效。用內建的
+                            // application-local-http.yml profile 明確 opt-out，而非更動預設值。
+                            "--spring.profiles.active=local-http"),
                     logDir.resolve("shopping-site-reference.log"));
 
             waitForHttp(SHOP_BASE_URL + "/shop/api/session/whoami", "shopping-site-reference", 60);
@@ -157,17 +165,38 @@ public final class CrossProcessE2EManualRunner {
     }
 
     private static void runFlows() throws Exception {
+        CookieManager cookieManager = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
         HttpClient http = HttpClient.newBuilder()
-                .cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL))
+                .cookieHandler(cookieManager)
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
+
+        // ---- Step 0：以一次 GET 觸發 shopping-site-reference 的 CsrfCookieFilter 核發
+        //      XSRF-TOKEN cookie（double-submit CSRF 防護，見 com.shop.reference.security.
+        //      CsrfCookieFilter）。真實前端是靠頁面載入時的 GET 請求（例如 /shop/api/session/
+        //      whoami、或直接載入 index.html）取得這個 cookie，之後所有 POST/DELETE 才讀
+        //      document.cookie 回填進 X-XSRF-TOKEN header；這裡用同一支 whoami 端點模擬。 ----
+        HttpResponse<String> csrfBootstrapResp = getJson(http, SHOP_BASE_URL + "/shop/api/session/whoami", Map.of());
+        record("啟動階段以 GET /shop/api/session/whoami 觸發 CsrfCookieFilter 核發 XSRF-TOKEN cookie"
+                        + "（double-submit CSRF 防護的前置步驟，本 harness 用來模擬真實前端頁面載入時的行為）",
+                csrfBootstrapResp.statusCode() == 200, true, csrfBootstrapResp.statusCode(), csrfBootstrapResp.body());
+        if (csrfBootstrapResp.statusCode() != 200) {
+            return;
+        }
+        String csrfToken = extractCookieValue(cookieManager, "XSRF-TOKEN");
+        record("成功從 Set-Cookie 取得 XSRF-TOKEN 值，後續所有狀態變更請求（POST/DELETE）皆會夾帶 X-XSRF-TOKEN header",
+                csrfToken != null && !csrfToken.isBlank(), true);
+        if (csrfToken == null || csrfToken.isBlank()) {
+            return;
+        }
+        Map<String, String> csrfHeader = Map.of("X-XSRF-TOKEN", csrfToken);
 
         String externalUserId = "u-e2e-" + RANDOM.nextInt(1_000_000);
         System.out.println("[harness] externalUserId = " + externalUserId);
 
         // ---- Step: demo login（建立購物網站 session，發起註冊的前提） ----
         HttpResponse<String> loginResp = postJson(http, SHOP_BASE_URL + "/shop/api/session/login-as",
-                Map.of("externalUserId", externalUserId), Map.of());
+                Map.of("externalUserId", externalUserId), csrfHeader);
         record("Demo login-as 建立 SHOP_SESSION（POST /shop/api/session/login-as）",
                 loginResp.statusCode() == 200, false, loginResp.statusCode(), loginResp.body());
         if (loginResp.statusCode() != 200) {
@@ -177,7 +206,7 @@ public final class CrossProcessE2EManualRunner {
         // ---- Step 3: 註冊 ceremony（透過 shopping-site-reference 代理） ----
         HttpResponse<String> regOptionsResp = postJson(http, SHOP_BASE_URL + "/shop/api/fido/registration/options",
                 Map.of("externalUserId", externalUserId, "displayName", "E2E Test User", "deviceLabel", "E2E Test Device"),
-                Map.of());
+                csrfHeader);
         boolean regOptionsOk = regOptionsResp.statusCode() == 200;
         record("註冊 options：透過 shopping-site-reference 代理向 fido-server 取得 challenge（POST /shop/api/fido/registration/options）",
                 regOptionsOk, true, regOptionsResp.statusCode(), regOptionsResp.body());
@@ -220,7 +249,7 @@ public final class CrossProcessE2EManualRunner {
         regResultBody.put("deviceLabel", "E2E Test Device");
 
         HttpResponse<String> regResultResp = postJson(http, SHOP_BASE_URL + "/shop/api/fido/registration/result",
-                regResultBody, Map.of());
+                regResultBody, csrfHeader);
         boolean regResultOk = regResultResp.statusCode() == 201;
         record("註冊 result：真實 android-key attestation（真實 StrongBox 等級聲明 + 密碼學合法憑證鏈+簽章）送驗，"
                         + "經 shopping-site-reference 代理到 fido-server 真實驗證通過並建立憑證/裝置（POST /shop/api/fido/registration/result -> 201）",
@@ -248,7 +277,7 @@ public final class CrossProcessE2EManualRunner {
 
         // ---- Step 4: 登入 ceremony ----
         HttpResponse<String> authOptionsResp = postJson(http, SHOP_BASE_URL + "/shop/api/fido/authentication/options",
-                Map.of("externalUserId", externalUserId), Map.of());
+                Map.of("externalUserId", externalUserId), csrfHeader);
         boolean authOptionsOk = authOptionsResp.statusCode() == 200;
         record("登入 options（POST /shop/api/fido/authentication/options）", authOptionsOk, true,
                 authOptionsResp.statusCode(), authOptionsResp.body());
@@ -278,7 +307,7 @@ public final class CrossProcessE2EManualRunner {
         Map<String, Object> authResultBody = Map.of("ceremonyId", authCeremonyId, "credential", assertionCredential);
 
         HttpResponse<String> authResultResp = postJson(http, SHOP_BASE_URL + "/shop/api/fido/authentication/result",
-                authResultBody, Map.of());
+                authResultBody, csrfHeader);
         boolean authResultOk = authResultResp.statusCode() == 200;
         record("登入 result：真實 assertion 簽章送驗，shopping-site-reference 代理 -> fido-server 真實驗證 -> 簽發 session JWT "
                         + "-> shopping-site-reference 真的透過 HTTP 打 fido-server JWKS 端點、ES256 驗簽通過、建立自己的 SHOP_SESSION "
@@ -318,7 +347,7 @@ public final class CrossProcessE2EManualRunner {
                 idorListRejected, true, idorListResp.statusCode(), idorListResp.body());
 
         HttpResponse<String> idorRevokeResp = deleteJson(http,
-                SHOP_BASE_URL + "/shop/api/fido/devices/" + deviceId + "?externalUserId=some-other-victim-user", Map.of());
+                SHOP_BASE_URL + "/shop/api/fido/devices/" + deviceId + "?externalUserId=some-other-victim-user", csrfHeader);
         JsonNode idorRevokeJson = idorRevokeResp.body() != null && !idorRevokeResp.body().isBlank()
                 ? tryParseJson(idorRevokeResp.body()) : null;
         boolean idorRevokeRejected = idorRevokeResp.statusCode() == 403
@@ -330,7 +359,7 @@ public final class CrossProcessE2EManualRunner {
 
         // ---- 正常撤銷：確認裝置管理代理在合法路徑下也真的把撤銷動作轉發到 fido-server ----
         HttpResponse<String> legitRevokeResp = deleteJson(http,
-                SHOP_BASE_URL + "/shop/api/fido/devices/" + deviceId, Map.of());
+                SHOP_BASE_URL + "/shop/api/fido/devices/" + deviceId, csrfHeader);
         boolean legitRevokeOk = legitRevokeResp.statusCode() == 200;
         JsonNode legitRevokeJson = legitRevokeOk ? JSON.readTree(legitRevokeResp.body()) : null;
         boolean legitRevokeStatusRevoked = legitRevokeJson != null && "REVOKED".equals(legitRevokeJson.path("status").asText(null));
@@ -351,6 +380,19 @@ public final class CrossProcessE2EManualRunner {
     // ------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------
+
+    /**
+     * 從 {@link CookieManager} 的 cookie jar 讀出指定名稱 cookie 的值——double-submit CSRF
+     * 防護需要把 cookie 的實際內容回填進 header，光靠 {@link CookieManager} 自動重送 cookie
+     * 是不夠的（見 com.shop.reference.security.CsrfCookieFilter Javadoc 的攻擊原理說明）。
+     */
+    private static String extractCookieValue(CookieManager cookieManager, String name) {
+        return cookieManager.getCookieStore().getCookies().stream()
+                .filter(c -> name.equals(c.getName()))
+                .map(HttpCookie::getValue)
+                .findFirst()
+                .orElse(null);
+    }
 
     private static boolean anyDeviceIdMatches(JsonNode devices, String deviceId, String expectedStatus) {
         if (devices == null || !devices.isArray()) {

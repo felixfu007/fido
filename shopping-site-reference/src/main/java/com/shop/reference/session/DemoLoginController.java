@@ -2,6 +2,7 @@ package com.shop.reference.session;
 
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
 import org.springframework.web.bind.annotation.CookieValue;
@@ -36,6 +37,15 @@ public class DemoLoginController {
 
     private final ShopSessionService shopSessionService;
 
+    /**
+     * 是否對 {@link ShopSessionService#COOKIE_NAME} cookie 設 {@code Secure} 屬性。
+     * checked-in 預設值（application.yml {@code shop.session.cookie.secure}）為 {@code true}
+     * （正式部署全站 TLS 的正確值）；本機無 TLS 的 HTTP 開發測試須明確 opt-out，見
+     * {@code application-local-http.yml}，不可倒過來把預設值改不安全。
+     */
+    @Value("${shop.session.cookie.secure:true}")
+    private boolean secureCookie;
+
     public DemoLoginController(ShopSessionService shopSessionService) {
         this.shopSessionService = shopSessionService;
     }
@@ -58,7 +68,7 @@ public class DemoLoginController {
                 .httpOnly(true)
                 .path("/")
                 .maxAge(0)
-                .secure(false)
+                .secure(secureCookie)
                 .sameSite("Lax")
                 .build();
         httpResponse.addHeader(HttpHeaders.SET_COOKIE, expired.toString());
@@ -78,9 +88,9 @@ public class DemoLoginController {
                 .httpOnly(true)
                 .path("/")
                 .maxAge(Duration.ofMinutes(30))
-                // 示範環境為求本機/HTTP 測試方便未強制 secure=true；正式部署（全站 TLS，見
-                // CLAUDE.md 傳輸安全）必須設為 true，與 AuthenticationProxyController 的做法一致。
-                .secure(false)
+                // secure 值來自 shop.session.cookie.secure（預設 true，見 application.yml 與
+                // secureCookie 欄位 Javadoc），與 AuthenticationProxyController 的做法一致。
+                .secure(secureCookie)
                 .sameSite("Lax")
                 .build();
         httpResponse.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());

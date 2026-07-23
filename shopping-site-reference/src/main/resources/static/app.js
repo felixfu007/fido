@@ -42,10 +42,27 @@ function log(elementId, label, data) {
   el.scrollTop = el.scrollHeight;
 }
 
+// ---------------------------------------------------------------------------
+// CSRF 防護（double-submit cookie pattern，見 com.shop.reference.security.CsrfCookieFilter）。
+// 後端在任何回應（包含這個頁面本身、GET /shop/api/session/whoami）都會核發一個
+// HttpOnly=false 的 XSRF-TOKEN cookie，前端只要原封不動讀出來、回填進每個「不安全方法」
+// （POST/PUT/PATCH/DELETE）請求的 X-XSRF-TOKEN header 即可——跨站的攻擊頁面讀不到這個
+// cookie（同源政策），組不出正確的 header，因此無法偽造這些請求。
+// ---------------------------------------------------------------------------
+function getCookie(name) {
+  const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function csrfHeaders() {
+  const token = getCookie('XSRF-TOKEN');
+  return token ? { 'X-XSRF-TOKEN': token } : {};
+}
+
 async function postJson(url, body) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...csrfHeaders() },
     credentials: 'same-origin',
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -253,7 +270,7 @@ async function listDevices() {
     btn.addEventListener('click', async () => {
       const deviceId = btn.getAttribute('data-device-id');
       const revokeRes = await fetch(`/shop/api/fido/devices/${encodeURIComponent(deviceId)}`,
-        { method: 'DELETE', credentials: 'same-origin' });
+        { method: 'DELETE', credentials: 'same-origin', headers: csrfHeaders() });
       const revokeJson = await revokeRes.json();
       log('deviceLog', `DELETE /shop/api/fido/devices/${deviceId} 回應`, revokeJson);
       listDevices();

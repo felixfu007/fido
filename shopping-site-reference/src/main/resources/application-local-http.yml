@@ -1,0 +1,18 @@
+# ---------------------------------------------------------------------------
+# 本機 HTTP 開發專用 Spring profile —— 明確的 opt-out，非預設值。
+#
+# 啟用方式：`--spring.profiles.active=local-http`（或環境變數
+# SPRING_PROFILES_ACTIVE=local-http）。CrossProcessE2EManualRunner（見
+# fido-server/src/test/java/com/fido/server/e2e/）在本機以 http://localhost 跑跨行程 E2E
+# 驗證時也是用這個 profile 啟動 shopping-site-reference，理由相同：Secure cookie
+# （SHOP_SESSION 登入 session、XSRF-TOKEN CSRF double-submit token）在 http 連線下不會被
+# 送出，兩者都會失效。
+#
+# 正式部署（全站 TLS）絕不可套用此 profile；application.yml 的 checked-in 預設值
+# （shop.session.cookie.secure=true）才是正式部署要用的值，這個檔案的存在本身就是
+# 「不安全一定要工程師主動選擇」的機制。
+# ---------------------------------------------------------------------------
+shop:
+  session:
+    cookie:
+      secure: false

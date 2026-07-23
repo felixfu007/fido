@@ -12,6 +12,7 @@ import com.shop.reference.session.ShopSession;
 import com.shop.reference.session.ShopSessionService;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -36,6 +37,14 @@ public class AuthenticationProxyController {
     private final FidoServerClient fidoServerClient;
     private final FidoSessionJwtValidator jwtValidator;
     private final ShopSessionService shopSessionService;
+
+    /**
+     * 是否對 {@link ShopSessionService#COOKIE_NAME} cookie 設 {@code Secure} 屬性，與
+     * {@link com.shop.reference.session.DemoLoginController#secureCookie} 同一個設定來源
+     * （{@code shop.session.cookie.secure}，預設 {@code true}），見該欄位 Javadoc。
+     */
+    @Value("${shop.session.cookie.secure:true}")
+    private boolean secureCookie;
 
     public AuthenticationProxyController(FidoServerClient fidoServerClient, FidoSessionJwtValidator jwtValidator,
                                           ShopSessionService shopSessionService) {
@@ -81,9 +90,8 @@ public class AuthenticationProxyController {
                 .httpOnly(true)
                 .path("/")
                 .maxAge(Duration.ofMinutes(30))
-                // 示範環境為求本機/HTTP 測試方便未強制 secure=true；正式部署（全站 TLS，見
-                // CLAUDE.md 傳輸安全）必須設為 true。
-                .secure(false)
+                // secure 值來自 shop.session.cookie.secure（預設 true，見 application.yml）。
+                .secure(secureCookie)
                 .sameSite("Lax")
                 .build();
         httpResponse.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());

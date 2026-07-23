@@ -18,6 +18,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.time.Instant;
 import java.util.List;
 
+import static com.shop.reference.testsupport.CsrfTestSupport.csrf;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
@@ -120,7 +121,7 @@ class DeviceProxyControllerTest {
     void revoke_notLoggedIn_returns401() throws Exception {
         mockNotLoggedIn();
 
-        mockMvc.perform(delete("/shop/api/fido/devices/dev-1"))
+        mockMvc.perform(delete("/shop/api/fido/devices/dev-1").with(csrf()))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.error.code").value("NOT_LOGGED_IN"));
     }
@@ -131,7 +132,7 @@ class DeviceProxyControllerTest {
         when(fidoServerClient.revokeDevice(LOGGED_IN_USER, "dev-1"))
                 .thenReturn(new DeviceRevokeResponse("dev-1", "REVOKED", "2026-07-23T10:00:00Z"));
 
-        mockMvc.perform(delete("/shop/api/fido/devices/dev-1").cookie(sessionCookie()))
+        mockMvc.perform(delete("/shop/api/fido/devices/dev-1").with(csrf()).cookie(sessionCookie()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("REVOKED"));
     }
@@ -141,6 +142,7 @@ class DeviceProxyControllerTest {
         mockLoggedIn();
 
         mockMvc.perform(delete("/shop/api/fido/devices/dev-1")
+                        .with(csrf())
                         .cookie(sessionCookie())
                         .param("externalUserId", "other-user"))
                 .andExpect(status().isForbidden())
@@ -154,7 +156,7 @@ class DeviceProxyControllerTest {
                 org.springframework.http.HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED",
                 "Rate limit exceeded for this tenant.", "req-trace-9", java.util.Map.of()));
 
-        mockMvc.perform(delete("/shop/api/fido/devices/dev-1").cookie(sessionCookie()))
+        mockMvc.perform(delete("/shop/api/fido/devices/dev-1").with(csrf()).cookie(sessionCookie()))
                 .andExpect(status().isTooManyRequests())
                 .andExpect(jsonPath("$.error.code").value("RATE_LIMITED"));
     }

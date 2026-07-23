@@ -67,8 +67,20 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
 
 ## 待辦事項
 
-- `shopping-site-reference/`：尚未實作 CSRF 防護（狀態變更端點僅靠 `SameSite=Lax` cookie），示範範例是否要一併補上正確模式待評估
-- `shopping-site-reference/`：session cookie 目前 `secure=false`（方便本機 HTTP 測試），正式部署（全站 TLS）需要改為 `true`
+`shopping-site-reference/` 的 CSRF 防護與 session cookie secure 預設值兩項待辦已完成：新增
+`com.shop.reference.security.CsrfCookieFilter`（手寫 double-submit cookie pattern，理由見該類別
+Javadoc——本專案未依賴 Spring Security，引入僅為了 CSRF 會拉入一整套與身分模型無關的自動配置，
+對參考範例是雜訊），涵蓋所有狀態變更端點（`POST /shop/api/session/login-as`、
+`POST /shop/api/session/logout`、`POST /shop/api/fido/registration/{options,result}`、
+`POST /shop/api/fido/authentication/{options,result}`、`DELETE /shop/api/fido/devices/{deviceId}`）；
+`SHOP_SESSION`/`XSRF-TOKEN` 兩個 cookie 的 `Secure` 屬性改由 `shop.session.cookie.secure`
+設定驅動，checked-in 預設值（`application.yml`）為 `true`，本機 HTTP 開發須以
+`--spring.profiles.active=local-http`（`application-local-http.yml`）明確 opt-out。
+`fido-server/src/test/java/com/fido/server/e2e/CrossProcessE2EManualRunner.java` 已同步更新
+（啟動 shopping-site-reference 子行程時套用 `local-http` profile、所有 POST/DELETE 呼叫夾帶
+CSRF header），重跑過完整跨行程 E2E（`scripts/run-cross-process-e2e.ps1`）確認 15 項檢查全數
+通過，IDOR 防護未受影響。
+
 - `android-credential-provider/`（dev-engineer 待接）：依「啟動器畫面決策」的 Option B，在 `prod` flavor 的 `src/main/AndroidManifest.xml` 新增一個最小「設定/狀態」啟動器 Activity 並建畫面（啟用狀態＋深連結系統設定按鈕＋版本/客服/隱私文字）；嚴守範圍邊界，不得含任何 ceremony 或裝置管理 UI。待其 OriginResolver/瀏覽器允許清單任務結束後另案進行
 
 ## 團隊分工（Claude Code Subagents）
