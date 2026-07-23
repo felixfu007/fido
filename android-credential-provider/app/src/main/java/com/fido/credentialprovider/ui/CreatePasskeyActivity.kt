@@ -20,6 +20,7 @@ import com.fido.credentialprovider.webauthn.AuthenticatorDataBuilder
 import com.fido.credentialprovider.webauthn.ClientDataBuilder
 import com.fido.credentialprovider.webauthn.CoseKeyEncoder
 import com.fido.credentialprovider.webauthn.OriginResolver
+import com.fido.credentialprovider.webauthn.RegistrationResponseFields
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.Signature
@@ -182,6 +183,8 @@ class CreatePasskeyActivity : AppCompatActivity() {
                             credentialIdB64Url = credentialIdB64Url,
                             clientDataJson = clientDataJson,
                             attestationObject = attestationObject,
+                            authenticatorData = authenticatorData,
+                            publicKeyDer = outcome.publicKey.encoded,
                         )
 
                         runOnUiThread {
@@ -204,12 +207,30 @@ class CreatePasskeyActivity : AppCompatActivity() {
         credentialIdB64Url: String,
         clientDataJson: ByteArray,
         attestationObject: ByteArray,
+        authenticatorData: ByteArray,
+        publicKeyDer: ByteArray,
     ): String {
-        // 對齊 api-contract.md 2.2 RegistrationResultRequest.CredentialAttestation 結構，
-        // 讓 harness 可以幾乎原封不動把這個 JSON 轉送給 fido-server /registration/result。
+        // 【2026-07-23 真機除錯新增 authenticatorData/publicKeyAlgorithm/publicKey】
+        // 對齊 api-contract.md 2.2 RegistrationResultRequest.CredentialAttestation 結構的同時，
+        // 也必須滿足 Chrome 原生層 Fido2CredentialRequest.MakeCredentialResponseFromJson 自己的
+        // 解析要求（`components/webauthn/json/value_conversions.cc` `MakeCredentialResponseFromValue`
+        // 查證結果，見 RegistrationResponseFields 檔頭說明）——這三個欄位對 fido-server 是冗餘的
+        // （fido-server 自行解析 attestationObject CBOR 取得同樣資訊，見任務回報，未動
+        // RegistrationResultRequest 契約），但 Chrome 在把結果交回頁面 JS 之前，會先用這三個
+        // 欄位跟它自己重新解碼 attestationObject 算出的值比對，不符或缺漏就直接判定整個回應
+        // 無效、不會呼叫到 fido-server。
+        val fields = RegistrationResponseFields.from(
+            clientDataJson = clientDataJson,
+            attestationObject = attestationObject,
+            authenticatorData = authenticatorData,
+            publicKeyDer = publicKeyDer,
+        )
         val response = JSONObject()
-            .put("clientDataJSON", b64UrlEncode(clientDataJson))
-            .put("attestationObject", b64UrlEncode(attestationObject))
+            .put("clientDataJSON", fields.clientDataJsonB64Url)
+            .put("attestationObject", fields.attestationObjectB64Url)
+            .put("authenticatorData", fields.authenticatorDataB64Url)
+            .put("publicKeyAlgorithm", fields.publicKeyAlgorithm)
+            .put("publicKey", fields.publicKeyB64Url)
             .put("transports", org.json.JSONArray(listOf("internal")))
 
         return JSONObject()
@@ -268,9 +289,6 @@ class CreatePasskeyActivity : AppCompatActivity() {
 
     private fun b64UrlDecode(s: String): ByteArray =
         Base64.decode(s, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-
-    private fun b64UrlEncode(bytes: ByteArray): String =
-        Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
 
     private fun sha256(input: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(input)
 

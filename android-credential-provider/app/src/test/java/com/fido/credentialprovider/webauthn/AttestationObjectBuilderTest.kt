@@ -105,6 +105,19 @@ class AttestationObjectBuilderTest {
         assertTrue(top["authData"] is ByteArray)
         assertArrayEquals(authenticatorData, top["authData"] as ByteArray)
 
+        // ---- 1b.【2026-07-23 真機除錯回歸測試】canonical CBOR 鍵順序 ----
+        // jackson-dataformat-cbor（本測試使用的解碼器）不強制、也不會回報鍵順序是否為 canonical
+        // CBOR——這正是先前 `authData`/`attStmt` 插入順序寫反的 bug 為何能通過這份既有測試、
+        // 卻在真機 Chrome（`components/cbor/reader.h` 明載「only accepts canonical CBOR」）當場
+        // 被拒收的原因。這裡額外釘住鍵的實際編碼順序（Jackson 對 untyped Map 反序列化保留串流
+        // 出現順序），確保 [Cbor] 的自動 canonical 排序持續把關，不會被日後修改悄悄破壞。
+        assertEquals(
+            "attestationObject 頂層 map 鍵必須是 canonical CBOR 順序（fmt 4bytes < attStmt " +
+                "8bytes < authData 9bytes），見 Cbor.kt / AttestationObjectBuilder.kt 檔頭說明",
+            listOf("fmt", "attStmt", "authData"),
+            top.keys.toList(),
+        )
+
         @Suppress("UNCHECKED_CAST")
         val attStmt = top["attStmt"] as Map<Any, Any>
         assertEquals(-7, (attStmt["alg"] as Number).toInt())

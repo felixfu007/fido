@@ -14,13 +14,22 @@ object CoseKeyEncoder {
 
     private const val COORDINATE_LENGTH = 32 // P-256 座標定長 32 bytes
 
+    /**
+     * COSE 演算法識別碼 ES256（ECDSA w/ SHA-256），對齊 RFC 8152 §8.1 Table 5 與
+     * WebAuthn `-7`。單一權威來源常數，供 COSE_Key 的 `alg`(3) 欄位、
+     * [AttestationObjectBuilder] 的 `attStmt.alg`，以及
+     * [com.fido.credentialprovider.webauthn.RegistrationResponseFields] 交給 Chrome 的
+     * `response.publicKeyAlgorithm` 三處共用，避免各自硬寫 `-7` 之後之後改動時互相脫鉤。
+     */
+    internal const val COSE_ALG_ES256: Int = -7
+
     fun encodeEcP256(publicKey: ECPublicKey): ByteArray {
         val x = toFixedLength(publicKey.w.affineX, COORDINATE_LENGTH)
         val y = toFixedLength(publicKey.w.affineY, COORDINATE_LENGTH)
 
         val cose = CborValue.obj(
             CborValue.of(1) to CborValue.of(2),   // kty: EC2
-            CborValue.of(3) to CborValue.of(-7),  // alg: ES256
+            CborValue.of(3) to CborValue.of(COSE_ALG_ES256),
             CborValue.of(-1) to CborValue.of(1),  // crv: P-256
             CborValue.of(-2) to CborValue.of(x),
             CborValue.of(-3) to CborValue.of(y),

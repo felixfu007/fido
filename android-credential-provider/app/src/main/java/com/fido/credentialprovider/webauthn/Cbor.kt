@@ -20,6 +20,25 @@ import java.io.ByteArrayOutputStream
  *
  * 本檔案位元組層級的正確性由 app/src/test 內的 JVM 單元測試驗證：用 fido-server 實際使用的
  * 同一套函式庫（jackson-dataformat-cbor）把本編碼器的輸出解回來，比對欄位是否一致。
+ *
+ * 【2026-07-23 真機除錯修正：CBOR map 鍵值必須是「canonical CBOR」順序】RFC 7049 §3.9 要求
+ * map 的鍵依「編碼後 bytes 長度，長度相同時再逐 byte 比較」排序；fido-server 使用的
+ * jackson-dataformat-cbor（本檔案既有測試 [AttestationObjectBuilderTest] 用於回讀驗證的函式庫）
+ * 與本專案先前手動控制插入順序的方式，兩者都**不會強制**這個排序——只要看起來像合法 CBOR
+ * map 就直接接受、依編碼順序回填成 `Map`，因此先前 `AttestationObjectBuilder` 手動排列的鍵
+ * 順序（`fmt`、`authData`、`attStmt`）不符合 canonical 順序（正確應為 `fmt`(4 bytes 編碼)、
+ * `attStmt`(8 bytes)、`authData`(9 bytes)，即先短後長）卻始終沒被任何既有測試或 fido-server
+ * 攔下來。真機透過 Chrome 實際跑註冊 ceremony 時才第一次踢到這個問題：Chromium
+ * `components/cbor/reader.h` 明載其解碼器「only accepts canonical CBOR」，鍵值順序不符會直接
+ * 判定為 `OUT_OF_ORDER_KEY` 解碼失敗，導致 Chrome 原生層 `MakeCredentialResponseFromValue`
+ * 在最外層 `attestationObject` 這個欄位的解析階段就失敗（對應 logcat 訊息
+ * `field missing or invalid: attestationObject`），比對齊 JSON 欄位（`authenticatorData`/
+ * `publicKeyAlgorithm`/`publicKey`，見 [com.fido.credentialprovider.webauthn.RegistrationResponseFields]
+ * 檔頭說明）更早發生、更根本。
+ *
+ * 修法：不再仰賴呼叫端手動把 [CborValue.Obj] 的 entries 依正確順序插入，改由編碼器本身在
+ * 序列化 map 前**自動依 canonical 規則排序鍵**，讓「呼叫端插入順序錯誤」這整類錯誤在編碼層
+ * 就不可能發生（而不是每處呼叫都要靠人工心算位元組長度來排序、容易再犯）。
  */
 object Cbor {
 
@@ -46,14 +65,34 @@ object Cbor {
                 value.items.forEach { writeValue(out, it) }
             }
             is CborValue.Obj -> {
-                writeMajorTypeWithLength(out, MAJOR_MAP, value.entries.size.toLong())
-                value.entries.forEach { (k, v) ->
-                    writeValue(out, k)
+                // canonical CBOR（RFC 7049 §3.9）：map 鍵一律依「編碼後 bytes 長度」由短到長，
+                // 長度相同時再逐 byte（無號）比較排序，不信任呼叫端傳入的 entries 順序。
+                val encodedEntries = value.entries.map { (k, v) -> encode(k) to v }
+                val canonical = encodedEntries.sortedWith(CANONICAL_MAP_KEY_COMPARATOR)
+                writeMajorTypeWithLength(out, MAJOR_MAP, canonical.size.toLong())
+                canonical.forEach { (kBytes, v) ->
+                    out.write(kBytes)
                     writeValue(out, v)
                 }
             }
         }
     }
+
+    /** 依 canonical CBOR 規則比較兩個「已編碼」鍵：先比 bytes 長度，再逐 byte（無號）比較。 */
+    private val CANONICAL_MAP_KEY_COMPARATOR: Comparator<Pair<ByteArray, CborValue>> =
+        Comparator { (a, _), (b, _) ->
+            if (a.size != b.size) {
+                a.size - b.size
+            } else {
+                var i = 0
+                var result = 0
+                while (i < a.size && result == 0) {
+                    result = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
+                    i++
+                }
+                result
+            }
+        }
 
     private fun writeInt(out: ByteArrayOutputStream, v: Long) {
         if (v >= 0) {
