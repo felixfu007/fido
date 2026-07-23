@@ -63,6 +63,8 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
 
 實作（把此 Activity 加進 `prod` 的 `src/main/AndroidManifest.xml` 並建畫面）由 dev-engineer 在其 OriginResolver/瀏覽器允許清單當前任務結束後另案承接，避免兩個 agent 同時建置同一 Gradle 專案；systems-analyst 本次僅落定決策文件、未動 Android 程式碼與 manifest。
 
+`OriginResolver.kt` 受信任瀏覽器 allowlist 已擴充並完成人工複核：dev-engineer 逐一比對 Google 官方即時服務端點 `gstatic.com/gpm-passkeys-privileged-apps/apps.json` 與兩個獨立開源密碼管理器專案的自動同步結果，**發現舊版 Chrome 穩定版指紋是先前未經查證即寫入的錯誤值**（任何權威/第三方來源皆查無比對），已更正並擴充涵蓋 Chrome（穩定版/Beta/Canary）、Firefox、Samsung Internet、Edge、Brave；我已獨立重新 fetch 官方端點逐位元組比對全部指紋（含多簽章項目）確認吻合，並重跑過 `OriginResolverTest` 8 項測試確認通過。原生 App origin 解析路徑（`android:apk-key-hash:...`）也已補上先前缺的模擬器端對端驗證：新增獨立驗證用模組 `android-credential-provider/testcaller/`（與 `:app` 無依賴、不同簽章身分，明確標示「驗證專用、非產品程式碼」），在 `fido_poc_avd` 模擬器上以真實 `CallingAppInfo`/`SigningInfo` 框架物件驅動，provider 端記錄的解析結果與獨立計算值完全一致。
+
 ## 待辦事項
 
 - `shopping-site-reference/`：`externalUserId` 目前保留為選填相容欄位（用於示範「夾帶不同值即拒絕」），評估是否要直接從請求 DTO 移除，讓這個攻擊面在型別層級就不存在

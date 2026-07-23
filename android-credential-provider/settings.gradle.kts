@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "fido-credential-provider"
 include(":app")
+include(":testcaller")
