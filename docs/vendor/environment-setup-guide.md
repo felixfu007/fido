@@ -163,39 +163,70 @@
 
 ## 6. 初始租戶開通
 
-`fido-server` v1 **沒有提供自助式的租戶管理 REST 端點**（對齊 origin 綁定決策 OB6：租戶開通採人工 onboarding）。正式租戶（= 一個購物網站網域）的建立方式如下：
+`fido-server` v1 **沒有提供對外的租戶管理 REST 端點**（對齊 origin 綁定決策 OB6：租戶開通採人工 onboarding），改以**本機 admin CLI** 開通，由平台維運方（賣方）在伺服器主機上直接執行，不開任何網路端口。
 
-### 6.1 需準備的租戶資料
+### 6.1 `create-tenant` 指令
+
+```
+java -jar fido-server.jar --spring.profiles.active=admin-cli \
+  --fido.admin.command=create-tenant \
+  --fido.admin.tenant.name=<租戶顯示名稱> \
+  --fido.admin.tenant.rp-id=<購物網站網域，如 shop.example.com> \
+  --fido.admin.tenant.expected-origin=<允許的 Web origin，如 https://shop.example.com> \
+  --fido.admin.tenant.rate-limit-tps=<選填，預設 100>
+```
+
+`rp_id` 唯一，重複開通會被明確擋下（不是資料庫例外堆疊）。指令會自動產生高熵 API Key，以下列規則落庫（對應 `ApiKeyService`，CLI 內部呼叫、不需人工手算）：
 
 | `tenants` 欄位 | 內容 |
 |---|---|
-| `name` | 租戶顯示名稱 |
-| `rp_id` | 購物網站網域（WebAuthn RP ID），如 `shop.example.com`。唯一。 |
-| `expected_origin` | 允許的 Web origin，如 `https://shop.example.com`；可存 JSON 陣列字串以支援多 origin |
-| `api_key_hash` | 該租戶 API Key 的 **SHA-256 雜湊（32 bytes 原始位元組）**。系統只存雜湊、不存明文（見 db-schema.md DB2）。 |
-| `api_key_prefix` | API Key 的前 12 個字元（明文，供運維識別） |
+| `tenant_uid` | CLI 自動產生（UUID） |
+| `name` / `rp_id` / `expected_origin` / `rate_limit_tps` | 取自上方參數 |
+| `api_key_hash` | 該租戶 API Key 的 **SHA-256 雜湊（32 bytes 原始位元組）**，CLI 自動計算，系統只存雜湊、不存明文（見 db-schema.md DB2） |
+| `api_key_prefix` | API Key 的前 12 個字元（明文，供運維識別），CLI 自動計算 |
 | `status` | `ACTIVE` |
-| `rate_limit_tps` | 預設 `100` |
 
-### 6.2 API Key 的產生與雜湊規則
+### 6.2 明碼 API Key 只印一次
 
-- API Key 為一組隨機字串，由平台營運方核發給租戶，透過安全管道交付，**只交付一次、平台不留明文**。
-- `api_key_hash` = `SHA-256(raw_api_key 的 UTF-8 bytes)`（對應 `ApiKeyService.hash`）。
-- `api_key_prefix` = raw key 的前 12 字元（對應 `ApiKeyService.prefix`）。
-- 租戶認證時，`fido-server` 對收到的 `X-API-Key` 取 SHA-256 後比對 `api_key_hash`，命中即決定租戶。
+指令執行成功後，明碼 API Key 只會印到終端機標準輸出一次，之後系統**無法再查回明碼**（只存雜湊）：
 
-### 6.3 開通步驟
+```
+================================================================================
+租戶開通成功
+================================================================================
+tenant_uid       : <uuid>
+name             : <租戶名稱>
+rp_id            : <rp_id>
+expected_origin  : <expected_origin>
+rate_limit_tps   : 100
 
-1. 產生一組足夠長的隨機 API Key。
-2. 計算其 SHA-256 雜湊與前綴。
-3. 以 SQL `INSERT` 寫入 `tenants` 一列（`api_key_hash` 為 `VARBINARY(32)`）。
-4. 將 raw API Key 透過安全管道交付租戶後端團隊。
+API KEY（以下明碼只印一次，之後系統無法再查回）：
+  fsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+================================================================================
+```
 
-> v1 沒有現成的正式租戶開通工具腳本；`DevDataSeeder`（`fido.dev-seed.*`）僅供開發，正式環境須關閉。若貴公司需要批量或自助化開通，須自行以上述雜湊規則實作。
+**請立即透過安全管道（加密通訊、密碼管理工具等）轉交給採用廠商，絕對不要把這組金鑰貼到 log 檔、issue tracker、聊天工具或版本控制系統。** 開通過程會寫入一筆 `audit_log`（`event_type=TENANT_PROVISIONED`），稽核紀錄只含 `tenant_uid`/API Key 前綴，不含明碼。
 
-### 6.4 原生 App 情境租戶的額外步驟（opt-in）
+> `DevDataSeeder`（`fido.dev-seed.*`）僅供開發，種入公開字串 API Key 的示範租戶，**正式環境務必確認關閉**（`fido.dev-seed.enabled=false`），正式租戶一律走本機 CLI 開通，不再人工 `INSERT`。
 
-若某租戶要啟用「購物網站原生 Android App 內直呼 Credential Manager」情境，還需完成 Digital Asset Links 綁定並登錄 `tenant_app_bindings`。詳細申請流程見 [`api-integration-guide.md`](api-integration-guide.md) 第 7 節。純瀏覽器情境的租戶不需要此步驟。
+### 6.3 原生 App 情境租戶的額外步驟（`add-app-binding`，opt-in）
+
+若某租戶要啟用「購物網站原生 Android App 內直呼 Credential Manager」情境，須在 `create-tenant` 之後另外執行 `add-app-binding`（刻意獨立成兩步，呼應 opt-in 精神——大多數租戶只需純瀏覽器情境，不需此步驟）：
+
+```
+java -jar fido-server.jar --spring.profiles.active=admin-cli \
+  --fido.admin.command=add-app-binding \
+  --fido.admin.tenant.rp-id=<既有租戶的 rp_id> \
+  --fido.admin.app.package-name=<Android applicationId> \
+  --fido.admin.app.sha256-fingerprint=<App 簽章憑證 SHA-256 指紋> \
+  --fido.admin.app.label=<選填，備註用途>
+```
+
+CLI 會自動換算 `apk_key_hash_origin`（`android:apk-key-hash:<base64url(指紋)>`）並寫入 `tenant_app_bindings`。完整申請流程（含廠商端 `assetlinks.json` 部署步驟）見 [`api-integration-guide.md`](api-integration-guide.md) 第 7 節。
+
+### 6.4 金鑰輪替（`rotate-signing-key`）
+
+同一支 admin CLI 也提供 session JWT 簽章金鑰的手動輪替指令，與租戶開通無關，用法與運維時機見 [`maintenance-guide.md`](maintenance-guide.md) 第 4 節。
 
 ---
 

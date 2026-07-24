@@ -1,7 +1,7 @@
 /*
 ==============================================================================
  002_create_tables.sql
- 建立七張核心表（DDL 依據 docs/db-schema.md 第 3-9 節「權威 schema」）
+ 建立八張核心表（DDL 依據 docs/db-schema.md 第 3-10 節「權威 schema」）
 
  建立順序依外鍵相依性排列，且此順序已可直接依序執行（後面的表只會參照前面已建立的表）：
    1. tenants
@@ -11,6 +11,7 @@
    5. auth_challenges      -> tenants, fido_user_ref
    6. audit_log            -> tenants, fido_user_ref（device_pk 依 db-schema.md DB16 不設外鍵）
    7. tenant_app_bindings  -> tenants（db-schema.md 第 9 節 / DB17：原生 App 情境的 App 授權登錄）
+   8. signing_keys         -> 無外鍵（db-schema.md 第 10 節 / DB18：平台級 session JWT 簽章金鑰持久化，多實例共享）
 
  PK / UNIQUE / CHECK / FK 皆內嵌於各自 CREATE TABLE 陳述式中（而非拆到獨立檔案），
  原因：SQL Server 建表當下即可宣告參照已存在資料表的外鍵，內嵌可讀性較佳、且與
@@ -226,5 +227,34 @@ BEGIN
 END
 GO
 
-PRINT N'002_create_tables.sql 執行完成：七張核心表已建立/確認存在。';
+------------------------------------------------------------------------------
+-- 10. signing_keys（session JWT 簽章金鑰持久化，db-schema.md 第 10 節 / DB18）
+--     平台級（非租戶隔離）；多個 fido-server 實例連同一庫 → 共享同一把 ACTIVE 金鑰，
+--     解決「重啟換金鑰 / 多實例 JWKS 不一致」問題。私鑰以 TDE 全庫加密保護（與其他
+--     機敏欄位同一層級），不做應用層額外封裝。
+------------------------------------------------------------------------------
+IF OBJECT_ID(N'dbo.signing_keys', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.signing_keys (
+        key_pk       BIGINT IDENTITY(1,1) NOT NULL,
+        kid          NVARCHAR(64)  NOT NULL,
+        algorithm    NVARCHAR(20)  NOT NULL CONSTRAINT DF_signkey_alg DEFAULT 'ES256',
+        curve        NVARCHAR(20)  NOT NULL CONSTRAINT DF_signkey_curve DEFAULT 'P-256',
+        private_key  VARBINARY(1024) NOT NULL,   -- PKCS#8 DER（EC P-256 私鑰）
+        public_key   VARBINARY(512)  NOT NULL,   -- X.509 SubjectPublicKeyInfo DER（供 JWKS 發布）
+        status       NVARCHAR(20)  NOT NULL CONSTRAINT DF_signkey_status DEFAULT 'ACTIVE',
+        created_at   DATETIME2(3)  NOT NULL CONSTRAINT DF_signkey_created DEFAULT SYSUTCDATETIME(),
+        retired_at   DATETIME2(3)  NULL,
+        CONSTRAINT PK_signing_keys PRIMARY KEY (key_pk),
+        CONSTRAINT UQ_signkey_kid UNIQUE (kid),
+        CONSTRAINT CK_signkey_status CHECK (status IN ('ACTIVE','RETIRED')),
+        CONSTRAINT CK_signkey_alg CHECK (algorithm IN ('ES256'))
+    );
+    -- 「同時最多一把 ACTIVE 金鑰」由 filtered unique index 保證（見 003_create_indexes.sql
+    -- 的 UX_signkey_one_active）——亦為多實例首次啟動並發產生金鑰時的競態防護：
+    -- 只有一個實例能成功 INSERT ACTIVE 列，其餘 INSERT 撞唯一索引失敗後改讀既有金鑰。
+END
+GO
+
+PRINT N'002_create_tables.sql 執行完成：八張核心表已建立/確認存在。';
 GO

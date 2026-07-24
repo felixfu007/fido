@@ -62,5 +62,14 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_appbind_tenant_status
     CREATE INDEX IX_appbind_tenant_status ON dbo.tenant_app_bindings (tenant_id, status);
 GO
 
+-- signing_keys（db-schema.md 第 10 節 / DB18）
+-- Filtered unique index：全表同時最多一把 status='ACTIVE' 金鑰。
+-- 用途一：語意約束（隨時只有一把正在用來簽發的金鑰）。
+-- 用途二：多實例首次啟動的並發競態防護——並發 INSERT ACTIVE 時只有一個成功，
+--         其餘撞此唯一索引失敗，改讀既有金鑰，避免產生多把互斥的 JWKS 金鑰。
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_signkey_one_active' AND object_id = OBJECT_ID(N'dbo.signing_keys'))
+    CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE status = 'ACTIVE';
+GO
+
 PRINT N'003_create_indexes.sql 執行完成：次要索引已建立/確認存在。';
 GO

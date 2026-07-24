@@ -279,9 +279,9 @@ Claims：
 
 **(B) 把 App 簽章指紋交給平台營運方登錄**
 
-把 `package_name` + `sha256_cert_fingerprints` 提供給平台營運方，由營運方換算成 `android:apk-key-hash:<base64url>` 形式的 app origin，寫入該租戶的 `tenant_app_bindings` 一列。
+把 `package_name` + `sha256_cert_fingerprints` 提供給平台營運方，由營運方透過本機 admin CLI 的 `add-app-binding` 指令登錄（CLI 自動換算成 `android:apk-key-hash:<base64url>` 形式的 app origin，寫入該租戶的 `tenant_app_bindings` 一列；指令用法見 [`environment-setup-guide.md`](environment-setup-guide.md) 第 6.3 節）。
 
-> v1 沒有自助管理端點（origin 綁定決策 OB6：採人工 onboarding）。此清單是伺服器把 app origin 納入租戶允許清單的權威來源。純瀏覽器租戶不需要此表任何列。支援一租戶多支 App / 多組簽章（正式 + 測試）。
+> v1 沒有自助管理端點（origin 綁定決策 OB6：採人工 onboarding，由平台維運方在主機上執行 CLI）。此清單是伺服器把 app origin 納入租戶允許清單的權威來源。純瀏覽器租戶不需要此表任何列。支援一租戶多支 App / 多組簽章（正式 + 測試）。
 
 ### 7.3 上線注意
 

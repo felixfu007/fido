@@ -35,9 +35,15 @@
 --   5. 新增第七張表 tenant_app_bindings（docs/db-schema.md 第 9 節 / DB17，origin 綁定架構
 --      OB3 定案後新增）：逐字對齊 infra/sql/002_create_tables.sql 該表 DDL，除上述第 1/4 點
 --      （省略 DEFAULT 子句、省略非唯一次要索引 IX_appbind_tenant_status）外，無額外差異。
+--   6. 新增第八張表 signing_keys（docs/db-schema.md 第 10 節 / DB18，session JWT 簽章金鑰
+--      持久化）：欄位/型別/PK/UQ_signkey_kid/CHECK 皆逐字對齊 infra/sql/002_create_tables.sql；
+--      唯一差異是 UX_signkey_one_active——正式 DDL 是 filtered unique index
+--      （CREATE UNIQUE INDEX ... WHERE status = 'ACTIVE'），但 H2 2.2.224 剖析器不支援
+--      CREATE INDEX 帶 WHERE 子句，改用「計算欄位 + 一般 UNIQUE 約束」達成等價語意，詳見該
+--      表定義前的說明註解。
 --
--- 除上述 5 點外，資料表/欄位/型別長度/NOT NULL/PK/UNIQUE/CHECK/FK 均逐字對齊
--- infra/sql/002_create_tables.sql（= docs/db-schema.md 第 3-9 節權威 DDL）。
+-- 除上述 6 點外，資料表/欄位/型別長度/NOT NULL/PK/UNIQUE/CHECK/FK 均逐字對齊
+-- infra/sql/002_create_tables.sql（= docs/db-schema.md 第 3-10 節權威 DDL）。
 --
 -- 【重要】本檔逐字寫小寫的表名/欄位名（對齊 docs/db-schema.md），但實際連線字串
 -- （application-h2.yml）刻意不加 DATABASE_TO_UPPER=false —— 也就是說 H2 仍會依其預設行為
@@ -191,4 +197,35 @@ CREATE TABLE tenant_app_bindings (
     CONSTRAINT FK_appbind_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id),
     CONSTRAINT CK_appbind_status CHECK (status IN ('ACTIVE','REVOKED')),
     CONSTRAINT CK_appbind_revreason CHECK (revoked_reason IN ('ADMIN','KEY_ROTATION','SECURITY'))
+);
+
+-- 第八張表：signing_keys（docs/db-schema.md 第 10 節 / DB18）。平台級資料，無 tenant_id/FK，
+-- 存 session JWT（ES256）簽章金鑰，供所有連同一資料庫的實例共享同一把 ACTIVE 金鑰。
+--
+-- 【與 infra/sql/002_create_tables.sql 的第 7 點差異】UX_signkey_one_active 在正式 SQL Server
+-- DDL 是 filtered unique index（CREATE UNIQUE INDEX ... WHERE status = 'ACTIVE'）；H2
+-- 2.2.224 的剖析器不支援 CREATE INDEX 帶 WHERE 子句（實測會拋
+-- org.h2.jdbc.JdbcSQLSyntaxErrorException: Syntax error）。改用「計算欄位 + 一般 UNIQUE
+-- 約束」達成等價效果：active_only_marker 只在 status='ACTIVE' 時才等於 'ACTIVE'、其餘一律為
+-- NULL，而 UNIQUE 約束在 ANSI SQL（含 H2）語意下不把多個 NULL 視為互相衝突，於是效果等同
+-- 「最多一列 status='ACTIVE'，RETIRED 列不受限制」——與正式 DDL 的 filtered unique index
+-- 語意一致，只是實作手法因 H2 語法限制而不同。此計算欄位不對應任何 JPA entity 欄位
+-- （SigningKeyEntity 沒有它），ddl-auto=validate 只驗證 entity 有對應到的欄位是否存在/型別
+-- 相容，不會因為 schema 多了這個 entity 未知的欄位而驗證失敗。
+CREATE TABLE signing_keys (
+    key_pk             BIGINT IDENTITY(1,1) NOT NULL,
+    kid                NVARCHAR(64)  NOT NULL,
+    algorithm          NVARCHAR(20)  NOT NULL,
+    curve              NVARCHAR(20)  NOT NULL,
+    private_key        VARBINARY(1024) NOT NULL,
+    public_key         VARBINARY(512)  NOT NULL,
+    status             NVARCHAR(20)  NOT NULL,
+    created_at         DATETIME2(3)  NOT NULL,
+    retired_at         DATETIME2(3)  NULL,
+    active_only_marker NVARCHAR(20) AS (CASE WHEN status = 'ACTIVE' THEN status ELSE NULL END),
+    CONSTRAINT PK_signing_keys PRIMARY KEY (key_pk),
+    CONSTRAINT UQ_signkey_kid UNIQUE (kid),
+    CONSTRAINT CK_signkey_status CHECK (status IN ('ACTIVE','RETIRED')),
+    CONSTRAINT CK_signkey_alg CHECK (algorithm IN ('ES256')),
+    CONSTRAINT UX_signkey_one_active UNIQUE (active_only_marker)
 );

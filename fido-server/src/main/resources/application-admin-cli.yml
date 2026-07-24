@@ -1,0 +1,24 @@
+# ---------------------------------------------------------------------------
+# Spring profile "admin-cli"：平台維運方在伺服器主機本機執行一次性管理指令用的 profile
+# （見 CLAUDE.md「租戶開通 / 簽章金鑰 CLI 決策」、com.fido.server.admin.AdminCliRunner）。
+#
+# 用法：
+#   java -jar fido-server.jar --spring.profiles.active=admin-cli \
+#        --fido.admin.command=create-tenant \
+#        --fido.admin.tenant.name="Some Shop" \
+#        --fido.admin.tenant.rp-id=shop.example.com \
+#        --fido.admin.tenant.expected-origin=https://shop.example.com
+#
+# 关键点：spring.main.web-application-type=none —— 這個 profile 啟動時【不開任何網路端口】，
+# 只跑完 AdminCliRunner.run() 就 System.exit()。CLI 本身連的資料庫（spring.datasource.*）
+# 仍沿用 application.yml 的正式路徑設定（或由呼叫端另外以命令列參數/環境變數覆寫指向實際的
+# SQL Server 實例），與「要不要開 web server」是兩件事。
+# ---------------------------------------------------------------------------
+spring:
+  main:
+    web-application-type: none
+    banner-mode: off
+
+logging:
+  level:
+    com.fido.server: WARN

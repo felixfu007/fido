@@ -22,15 +22,15 @@
 | API 版本策略 | URI 路徑版本 `/api/v1` |
 | API 認證 Header | `X-API-Key`（必，決定租戶）+ 選用 `X-Tenant-Id`（交叉檢查）/ `X-Request-Id`（追蹤） |
 | 租戶速率限制 | 每租戶 100 TPS，超過回 `429` + `Retry-After` |
-| 正式租戶開通 | 目前無管理後台/開通工具，僅 `DevDataSeeder`（開發用，種入公開字串 API Key 的 `Demo Shop` 示範租戶）。正式租戶採人工方式直接 `INSERT tenants`（API Key 以 SHA-256 雜湊 + 12 字前綴儲存，規則見 `ApiKeyService`），與 `docs/origin-binding.md` OB6 的人工 onboarding 一致。**上線前必須關閉 `DevDataSeeder`**，否則正式環境會殘留可公開查到的示範租戶 API Key；已列入 `docs/vendor/environment-setup-guide.md` 部署檢查清單。 |
+| 正式租戶開通 | **已拍板，待 dev-engineer 實作**：採**本機 admin CLI**（Spring Boot `CommandLineRunner`，`admin-cli` profile 啟動、不起 web server、一次性執行後 `System.exit`），**不**開對外管理 REST 端點。理由見下方「租戶開通 / 簽章金鑰 CLI 決策」。`create-tenant` 指令由平台維運方在伺服器主機上執行，輸入租戶名/`rp_id`/`expected_origin`（可多個）/選填 `rate-limit-tps`，自動產生高熵 API Key、以既有 `ApiKeyService` 規則存雜湊+前綴、明碼金鑰**只印一次到 stdout**（提示安全轉交、絕不寫 log）。原生 App 綁定（`tenant_app_bindings`）**刻意分成獨立 `add-app-binding` 指令**、不併入 `create-tenant`（呼應 OB6 人工 onboarding、opt-in 的後續步驟）。`DevDataSeeder` 續留為**僅 dev** 用途（`fido.dev-seed.enabled` 預設 `false`），**上線前務必確認關閉**；正式開通一律走 CLI 不再人工 `INSERT`。 |
 | Session JWT 演算法 | ES256（EC P-256），公鑰經 JWKS 端點提供 |
 | Session JWT 有效期 | 120 秒 |
-| Session JWT 簽章金鑰持久化 | **骨架限制，尚未解決**：`JwtService` 目前在每次程序啟動時於記憶體產生新的 EC P-256 金鑰對，重啟即換金鑰、多實例間也不共享同一把鑰匙。單一實例部署不受影響（同一把鑰匙簽發與驗證），但正式環境若跑多實例（負載平衡/高可用）會導致 JWKS 端點回傳的公鑰因實例而異、部分請求驗證失敗。屬部署層待解事項，非本次範圍，已如實寫入 `docs/vendor/maintenance-guide.md`、`docs/vendor/technical-limitations.md` 供採用廠商評估；正式解法（例如金鑰持久化到資料庫/KMS 並支援輪替）留待有實際多實例部署需求時再設計。 |
+| Session JWT 簽章金鑰持久化 | **已拍板，待 dev-engineer 實作**：金鑰持久化到資料庫**第八張表 `signing_keys`**（見 `docs/db-schema.md` 第 10 節 / DB18），多實例連同一庫即天然共享同一把 `ACTIVE` 金鑰，解決重啟換鑰/JWKS 不一致缺口。私鑰以 PKCS#8 存 `VARBINARY`、由既有 TDE 保護（不加應用層封裝）。**啟動行為**：載入唯一 `ACTIVE` 金鑰；全新庫首啟則自動產生並 INSERT（filtered unique index `UX_signkey_one_active` 保證至多一把 ACTIVE，兼作多實例首啟並發競態防護，敗者改讀既有金鑰）；後續啟動一律載入不重生。**輪替**：v1 只做「持久化 + 單一有效金鑰」，schema 已預留 `status`/`retired_at` 使日後輪替免改表；不做自動排程輪替，僅提供 admin CLI `rotate-signing-key` 手動指令（因 JWT 僅 120 秒效期，重疊窗口極小，JWKS 一併發布 ACTIVE+RETIRED 公鑰即可平滑過渡）。理由與規格見下方「租戶開通 / 簽章金鑰 CLI 決策」。 |
 | 防帳號列舉策略 | 登入與裝置管理 API 一律採 200 + 空清單 / 冪等 no-op，不用 404 洩漏使用者或裝置是否存在 |
 | 傳輸安全 | TLS + API Key |
 | WebAuthn origin 綁定 / 存取情境 | v1 provider 一併支援「瀏覽器存取」與「購物網站原生 App 直呼 Credential Manager」兩情境；原生 App 情境對每個租戶採 **opt-in**（租戶須完成 `assetlinks.json` Digital Asset Links onboarding + 平台登錄 App 簽章指紋至 `tenant_app_bindings`）。origin 由 provider 從呼叫方動態、經驗證取得（不寫死），伺服器以 `expected_origin`(web) ∪ `tenant_app_bindings`(app) 允許清單把關，不符回 `403 ORIGIN_NOT_ALLOWED`。詳見 `docs/origin-binding.md` |
 | Challenge 時效 | 60 秒，逾時前端自動重新申請 |
-| 資料庫 | 獨立 SQL Server 實例（與其他系統分開）；七張核心表：`tenants`, `fido_user_ref`, `fido_credentials`, `bound_devices`, `auth_challenges`, `audit_log`, `tenant_app_bindings`（第七張為原生 App 情境的 Digital Asset Links 授權登錄，見 `docs/origin-binding.md`） |
+| 資料庫 | 獨立 SQL Server 實例（與其他系統分開）；八張核心表：`tenants`, `fido_user_ref`, `fido_credentials`, `bound_devices`, `auth_challenges`, `audit_log`, `tenant_app_bindings`, `signing_keys`（第七張為原生 App 情境的 Digital Asset Links 授權登錄，見 `docs/origin-binding.md`；第八張為 session JWT 簽章金鑰持久化，見 `docs/db-schema.md` 第 10 節 / DB18） |
 | 加密/備份 | TDE 全庫加密 + 標準定期備份 |
 | 容量目標 | 中小規模：數萬會員，峰值 ≤100 TPS |
 | 部署 | 全地端部署（非雲端） |
@@ -73,9 +73,53 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
 
 **啟動器畫面決策 Option B 已實作完成**：`SetupStatusActivity`（`android-credential-provider/app/src/main/java/com/fido/credentialprovider/ui/SetupStatusActivity.kt` + `SetupStatusSupport.kt` + `res/layout/activity_setup_status.xml`）已加入 `src/main/AndroidManifest.xml`，為 `prod`/`poc` 共用的 `MAIN`/`LAUNCHER` 元件（`poc` 額外合併 `HarnessActivity` 作第二個啟動圖示，不影響 `prod`）。嚴守範圍邊界，僅含啟用狀態、深連結系統設定按鈕、版本/客服/隱私文字，無任何 ceremony 或裝置管理 UI。兩個技術選型皆以 `javap` 反組譯 `android-34/android.jar` 與 `androidx.credentials:credentials:1.5.0` 位元組碼查證（非猜測）：(1) 啟用狀態查詢用 framework `android.credentials.CredentialManager#isEnabledCredentialProviderService(ComponentName)`（androidx 版本無此 API）；(2) 深連結沿用 androidx `CredentialManager.createSettingsPendingIntent()` 實作內部使用的同一組 `Intent("android.settings.CREDENTIAL_PROVIDER").setData(Uri.parse("package:"+套件名))`。已在 `fido_poc_avd` 模擬器上實機（模擬器）驗證：launcher 圖示可解析為 `SetupStatusActivity`、畫面正確渲染、按鈕深連結精準導向系統「Passwords & accounts > Additional providers > FIDO Authenticator」列（螢幕截圖確認）。**已知模擬器限制（非本次程式碼缺陷）**：`isEnabledCredentialProviderService` 呼叫在此模擬器映像上，無論查詢前後、也無論嘗試切換系統設定開關，皆從 Binder 端拋出解序列化失敗的 `NullPointerException`（`system_server` 端 `CredManSysService` log 已確認收到完全正確的 `ComponentName`，故排除呼叫端組錯參數的可能）；且系統設定開關本身在此模擬器上點擊後 log 顯示 `setEnabledProviders success` 但畫面/狀態未實際變成已啟用，研判是此 AVD 系統映像對第三方（非 Google 簽章）credential provider 的啟用管線限制或已知平台缺陷，非本 App 程式碼可修正。程式碼已針對此三態（true/false/null）容錯設計，查詢失敗會優雅降級為「無法判定，請至設定確認」文字並附測試（`SetupStatusSupportTest`，JVM 純字串邏輯，7 項全過）而不會使 App 崩潰；`enabled=true` 顯示路徑僅有單元測試涵蓋（`statusLabel(true)`），未能在此模擬器上端對端驗證，列為待實體裝置驗證項目（比照既有 PoC「條件式通過 pending 實機」精神）。**（後續更新，Pixel 9 實機驗證）**：在真實裝置上開啟本畫面，`isEnabledCredentialProviderService` 呼叫兩次（`onCreate`/`onResume` 各一次）皆正常回傳、無任何例外 log，畫面正確顯示「已啟用」，與使用者實際在系統設定看到的狀態一致。證實上述 `NullPointerException` 確實是模擬器平台限制，非本 App 邏輯缺陷；`enabled=true` 顯示路徑至此也完成端對端真機驗證。
 
+### 租戶開通 / 簽章金鑰 CLI 決策（實作規格，dev-engineer 承接）
+
+兩項先前僅在採用廠商文件揭露為「未解決」的缺口，經 systems-analyst 拍板為可實作決策（本段為交接規格）。技術限制手冊 `docs/vendor/technical-limitations.md` 第 9/12 項與維護手冊 `docs/vendor/maintenance-guide.md` 第 4 節目前措辭仍為「尚未持久化 / 僅腳本就緒」等**未解決**用語；**待 dev-engineer 實作並經 qa 驗證後，再由 dev-engineer 回頭把這兩份文件的用詞改為「已實作」**（systems-analyst 本次未動 `docs/vendor/*.md` 內文）。
+
+**共用載體：admin CLI（`admin-cli` Spring profile）**
+
+- 一個 Spring Boot `CommandLineRunner`（例如 `com.fido.server.admin.AdminCliRunner`），**僅在 `admin-cli` profile active 時**建立為 bean（`@Profile("admin-cli")`）。此 profile 另以 profile 專屬設定關閉 web server（`spring.main.web-application-type=none`）——即開通/輪替操作**不開任何網路端口**，只在伺服器主機本機以 `java -jar fido-server.jar --spring.profiles.active=admin-cli --fido.admin.command=<cmd> ...` 執行，跑完 `System.exit(code)`（成功 0、失敗非 0）。
+- **為何 CLI 而非管理 REST 端點**：部署模型為全地端、操作者是平台維運方（賣方）本人、採用廠商只拿自己租戶的 API Key 不會也不需呼叫開通。CLI 以「能 shell 進主機」為隱含強認證，零新增攻擊面；反觀對外管理端點需另立一組平台管理金鑰（與其欲取代的人工密鑰管理形成雞生蛋問題）、需 IP allowlist/localhost 限制、且在此部署模型下對唯一合法呼叫者（有主機權限者）毫無便利性淨益，只擴大攻擊面。故一律 CLI，不開管理端點。
+- CLI 共用既有 `ApiKeyService`、JPA repository、實體，**不得**手算雜湊或手寫 SQL。每個成功操作寫一筆 `audit_log`（`event_type` 為新增字串 `TENANT_PROVISIONED` / `TENANT_APP_BINDING_ADDED` / `SIGNING_KEY_ROTATED`，`outcome='SUCCESS'`；`audit_log.event_type` 為自由 `NVARCHAR(50)` 無 CHECK，**不需改 schema**），且**稽核列與 log 一律只記 `tenant_uid`/`api_key_prefix`，永不記明碼金鑰**。
+
+**指令 1：`create-tenant`（缺口二）**
+
+- 參數：`--fido.admin.tenant.name=`（必）、`--fido.admin.tenant.rp-id=`（必）、`--fido.admin.tenant.expected-origin=`（必，允許重複帶入多個或以 JSON 陣列字串表示，落庫格式對齊 `tenants.expected_origin` 現行「單一字串或 JSON 陣列字串」慣例）、`--fido.admin.tenant.rate-limit-tps=`（選填，預設 100）。其餘 `tenants` 欄位皆由預設/自動產生涵蓋（`tenant_uid`=NEWID、`status`=ACTIVE、`created_at`/`updated_at`），**無其他必填欄位**。
+- API Key 產生：CLI 端產生高熵金鑰，建議格式 `fsk_` + `base64url(32 random bytes)`（前綴 `fsk_` 讓 `ApiKeyService.prefix` 取到的前 12 字含可辨識前綴）。以 `ApiKeyService.hash`/`prefix` 落庫雜湊+前綴，**不存明碼**。
+- 輸出：明碼金鑰**只印一次到 stdout**（非 logger），以明確分隔區塊呈現租戶 `tenant_uid`/`name`/`rp_id`/`expected_origin`/`rate_limit_tps` 與 `API KEY`，並附「請立即透過安全管道轉交採用廠商、之後無法再查回、切勿寫入 log」警語。
+- `rp_id` 已有 `UQ_tenants_rpid` 唯一約束；重複 `rp_id` 應被 CLI 攔為明確錯誤訊息（非堆疊追蹤）。
+
+**指令 2：`add-app-binding`（缺口二的 OB6 後續步驟，刻意獨立）**
+
+- **不併入 `create-tenant`**：呼應 `docs/origin-binding.md` OB6——原生 App 綁定是 opt-in、且在採用廠商完成 `assetlinks.json` 部署後才辦理的**後續人工 onboarding**，與租戶開通時序解耦。
+- 參數：以 `--fido.admin.tenant.uid=`（或 rp-id）定位既有租戶 + `--fido.admin.app.package-name=` + `--fido.admin.app.sha256-fingerprint=`（十六進位或 base64）+ 選填 `--fido.admin.app.label=`。CLI 換算 `apk_key_hash_origin`（`android:apk-key-hash:<base64url(fingerprint)>`）寫入 `tenant_app_bindings`（對齊 db-schema.md 第 9 節欄位與 `UQ_appbind_tenant_pkg_fp`）。
+
+**指令 3：`rotate-signing-key`（缺口一的手動輪替，非必跑）**
+
+- 把現行唯一 `ACTIVE` 的 `signing_keys` 列改為 `status='RETIRED'`+`retired_at=now`，產生新 EC P-256 金鑰對以新 `kid` INSERT 為 `ACTIVE`。因 JWKS 一併發布 ACTIVE+RETIRED 公鑰，舊 `kid` 簽出、≤120 秒內的 JWT 過渡期仍可驗簽。**無自動排程輪替**；此指令僅供疑似金鑰外洩等需求時手動使用。
+
+**缺口一：`JwtService` 改為持久化金鑰（正常執行期，非 CLI）**
+
+- 新增 `signing_keys` 表（**已在** `docs/db-schema.md` 第 10 節 / DB18、`infra/sql/002_create_tables.sql`、`infra/sql/003_create_indexes.sql` 落定；dev-engineer 建對應 JPA 實體 + repository）。
+- `JwtService` 建構時**不再** `generateKeyPair()` 於記憶體；改為：讀唯一 `ACTIVE` 列 → 以 `PKCS8EncodedKeySpec`/`X509EncodedKeySpec` + `KeyFactory("EC")` 還原 `KeyPair`，`kid`/公鑰以該列為權威。若無 `ACTIVE` 列則產生一組（`kid` 取 `fido.session-jwt.kid` 若非空、否則 `sk_<yyyyMMdd>_<短亂數>`）並 INSERT；多實例首啟並發時倚賴 `UX_signkey_one_active` filtered unique index，撞唯一鍵者改讀既有列（需捕捉 `DataIntegrityViolation` 後重讀，確保最終共用同一把）。
+- `jwks()` 改為回傳**所有** `ACTIVE`+`RETIRED` 列的公鑰（`JwkSet` 已是 `List<Jwk>`，**介面不變**、`JwksController` 不需改）。
+- `issue(...)` 的 JWT header `kid` 改用載入金鑰的 `kid`（不再直接讀 `fido.session-jwt.kid`）。`DevDataSeeder` 續留 dev-only、不受影響。
+
+**（後續更新，dev-engineer 實作完成，pending qa-engineer 驗證）** 兩個缺口皆已依上述規格實作：
+
+- 缺口一：新增 `SigningKey`（domain）/`SigningKeyRepository`（介面）/`SigningKeyEntity`+`SpringDataSigningKeyRepository`+`JpaSigningKeyRepository`（JPA 實作）/`InMemorySigningKeyRepository`（memory 模式，比照既有慣例；也讓 `fido.persistence.mode=memory` 下「同時最多一把 ACTIVE」語意與 JPA 一致，插入第二把 ACTIVE 會拋 `DataIntegrityViolationException`）。新增 `SigningKeyFactory`（EC P-256 金鑰對 + kid 產生，`JwtService` 首啟與 CLI `rotate-signing-key` 共用）。`JwtService` 已依規格改寫：建構時載入/首啟產生、`issue()`/`jwks()` 皆以資料庫金鑰為權威。**H2 測試 schema 的已知落差**：正式 SQL Server DDL 的 `UX_signkey_one_active` 是 filtered unique index（`WHERE status='ACTIVE'`），但 H2 2.2.224 剖析器不支援 `CREATE INDEX ... WHERE` 語法，測試用 `schema-h2.sql` 改用「計算欄位（`status='ACTIVE'` 時取值、否則 NULL）+ 一般 UNIQUE 約束」達成等價語意（ANSI SQL/H2 皆不視多個 NULL 為互相衝突），僅影響 `fido-server/src/test/resources/db/h2/schema-h2.sql`，未動 `infra/sql/002_create_tables.sql`/`003_create_indexes.sql` 的正式 DDL。
+- 缺口二：新增 `com.fido.server.admin` 套件（`AdminCliRunner`/`AdminCliProperties`/`AdminCliException`）+ `application-admin-cli.yml`（`spring.main.web-application-type=none`）。三個指令皆依規格完成；**與本段原規格的一個落差**：`add-app-binding` 實際只支援 `--fido.admin.tenant.rp-id=` 定位既有租戶，未實作 `--fido.admin.tenant.uid=` 這個替代定位方式——交付時收到的細部規格明確只列 rp-id 一種，未提及 tenant uid 選項，故僅實作前者；如平台維運方實務上需要用 `tenant_uid` 定位（例如 rp_id 尚未取得或已變更的情境），需再請 systems-analyst 確認是否要補上，目前不算未完成，僅記錄此落差供後續參考。
+- 測試：新增 `JwtServiceTest`（mock repository，涵蓋首次啟動產生/沿用既有 ACTIVE/併發衝突改讀既有列三種情境）、`InMemorySigningKeyRepositoryTest`、`JpaPersistenceH2FlowTest` 新增一個測試方法（對真實 H2 資料庫驗證 filtered-unique-index 等價約束真的擋下第二把 ACTIVE、輪替後 `findAll()` 正確回傳 ACTIVE+RETIRED）、`com.fido.server.admin.AdminCliRunnerTest`（三指令各自的正常路徑 + 主要錯誤路徑，使用 in-memory repository 而非 mock）。`mvn test` 54/54 全過。已用 `mvn spring-boot:run -Dspring-boot.run.profiles=admin-cli`（file-based H2，`-Dspring-boot.run.useTestClasspath=true` 借用 test-scope 的 H2 依賴）手動跑過 `create-tenant → add-app-binding → rotate-signing-key` 完整鏈路與 `create-tenant` 重複 `rp_id` 的錯誤路徑，皆行為正確、程序確實結束（成功 exit 0、錯誤 exit 1，且錯誤路徑只印一行清楚訊息、無 stack trace）。
+**（後續更新，qa-engineer 獨立驗證通過）** qa-engineer 重新獨立執行 `mvn clean test`（54/54 全過，非僅信任自報數字），並額外做了七項對抗性驗證：(1) 發現 `JwtServiceTest` 的併發首啟保護測試是純 mock、未證明真實併發下有效，自行對真實 H2 補寫 8 條 thread 併發 INSERT 的測試，結果 `successCount=1 conflictCount=7`，證實 H2 schema workaround 在真實併發寫入下與正式 filtered unique index 語意等效；(2) 用獨立 JVM 進程搭配 `taskkill` 真正終止再重啟，確認兩次啟動的 JWKS `kid`/`x`/`y` 完全相同，證實真正持久化載入而非重新產生；(3) 用 `grep -rl` 掃過整個 `fido-server/` 目錄與 `audit_log` 資料表，確認明碼 API Key 只出現在 stdout、不落地到任何 log 或稽核紀錄，並以獨立算出的 SHA-256 雜湊比對 `tenants.api_key_hash` 逐位元組相符；(4) 三個 CLI 指令的成功/失敗路徑皆以獨立進程驗證 exit code 正確（成功 0、已知錯誤 1 且無 stack trace）；(5) 完整走一次「用舊金鑰簽發 JWT → 執行 `rotate-signing-key` → 用 JWKS 回傳的舊公鑰手動驗簽」，證實輪替後過渡期內舊 token 仍可驗證。結論：**兩項功能驗證通過，可以合入**。`add-app-binding` 僅支援 `rp_id` 定位（不支援 `tenant_uid`）經確認因 `rp_id` 本身即為唯一約束、不影響功能完整性，維持現狀不需補實作。附帶發現一項既有風險的佐證（非本次交付範圍）：`DevDataSeeder` 在 file-based DB 重啟且 `fido.dev-seed.enabled=true` 時會因租戶已存在而啟動失敗，印證前面「上線前務必關閉」提醒的必要性。
+
+`docs/vendor/technical-limitations.md`（#12）、`docs/vendor/maintenance-guide.md`（§4）、`docs/vendor/environment-setup-guide.md`（第 6 節）、`docs/vendor/api-integration-guide.md`（第 7.2 節）的「未解決／人工 SQL INSERT」用詞已同步改為反映 admin CLI 已實作的現況。
+
 ## 待辦事項
 
-目前無開放待辦事項。先前列出的三項（`shopping-site-reference/` CSRF 防護、session cookie
+目前無開放待辦事項。上述兩項缺口（Session JWT 簽章金鑰持久化、正式租戶開通 CLI）已完成實作並經 qa-engineer 獨立驗證通過，相關採用廠商文件用詞已同步更新。
+
+先前列出的三項（`shopping-site-reference/` CSRF 防護、session cookie
 `secure` 預設值、`android-credential-provider/` 啟動器畫面 Option B 實作）皆已完成，過程與結果
 記於上方「目前階段」相關段落（CSRF/cookie 見購物網站串接參考範例段落；啟動器畫面見「啟動器畫面決策」
 段落）。`externalUserId` DTO 欄位一項則是拍板保留、非「尚未處理」，理由同見上方段落。

@@ -6,9 +6,11 @@
 - 對齊文件：`d:\fido\docs\api-contract.md`、`d:\fido\CLAUDE.md`
 - 讀者：dev-engineer（JPA/實體對應）、devops-engineer（建庫、索引、備份、清理排程）
 
-> 本文件是七張核心表的**權威 schema**。欄位命名與型別以此為準，dev / devops 請勿自行臆測。凡標記 **【本文件補充決策 DBn】** 者為 CLAUDE.md / API 合約未明確涵蓋、由本文件先行決定、待人工複核回填的細節，清單見文末附錄 B。
+> 本文件是八張核心表的**權威 schema**。欄位命名與型別以此為準，dev / devops 請勿自行臆測。凡標記 **【本文件補充決策 DBn】** 者為 CLAUDE.md / API 合約未明確涵蓋、由本文件先行決定、待人工複核回填的細節，清單見文末附錄 B。
 >
 > 第七張表 `tenant_app_bindings`（原生 App 情境的 Digital Asset Links 授權登錄）為 origin 綁定架構定案（`docs/origin-binding.md` OB1/OB3）後新增，早期六張表的敘述已一併更新為七張。
+>
+> 第八張表 `signing_keys`（session JWT 簽章金鑰持久化，DB18）為「多實例部署共享簽章金鑰」缺口拍板後新增（見 CLAUDE.md 決策表「Session JWT 簽章金鑰持久化」列）。此表為**平台級**（不隸屬任何租戶、無 `tenant_id`）。
 
 ---
 
@@ -23,9 +25,10 @@
 7. [`auth_challenges`](#7-auth_challenges)
 8. [`audit_log`](#8-audit_log)
 9. [`tenant_app_bindings`](#9-tenant_app_bindings)
-10. [索引與外鍵總表](#10-索引與外鍵總表)
-11. [資料保留與清理排程](#11-資料保留與清理排程)
-12. [附錄 B：本文件補充決策清單](#附錄-b本文件補充決策清單)
+10. [`signing_keys`](#10-signing_keys)
+11. [索引與外鍵總表](#11-索引與外鍵總表)
+12. [資料保留與清理排程](#12-資料保留與清理排程)
+13. [附錄 B：本文件補充決策清單](#附錄-b本文件補充決策清單)
 
 ---
 
@@ -61,6 +64,7 @@ tenants (1) ──< fido_user_ref (1) ──< fido_credentials (1) ──(1:1)�
 - `fido_credentials 1 : 1 bound_devices` **【DB14】**：v1 情境 A 每次註冊在一台裝置產生一把 platform 憑證，故一憑證對一裝置。日後若同裝置多憑證再改 1:N。
 - `auth_challenges`：短生命週期，綁租戶；註冊時綁 `user_ref`，登入（usernameless）時 `user_ref_id` 可為 NULL，於驗證成功後由 credential 反查。
 - `audit_log`：獨立事件表，`tenant_id`/`user_ref_id` 允許 NULL（涵蓋 API Key 無效等 pre-auth 事件）。
+- `signing_keys`：**平台級、與租戶無關**的獨立表（不在上圖關係內、無外鍵），存 session JWT 簽章金鑰供所有實例共享。見第 10 節。
 
 ---
 
@@ -423,7 +427,59 @@ CREATE INDEX IX_appbind_tenant_status ON dbo.tenant_app_bindings (tenant_id, sta
 
 ---
 
-## 10. 索引與外鍵總表
+## 10. `signing_keys`
+
+Session JWT（ES256 / EC P-256）簽章金鑰的持久化保存。**平台級資料**（非租戶隔離、無 `tenant_id`、無外鍵）。
+
+存在理由：`JwtService` 原本在應用啟動時於記憶體產生金鑰對，重啟即更換、多實例間互不相同，導致多實例水平部署時跨實例 JWKS 驗簽失敗。改為持久化到本表後，所有連同一資料庫的 `fido-server` 實例共享同一把 `ACTIVE` 金鑰，JWKS 一致。私鑰由 TDE 全庫加密於落盤層保護（與 `fido_credentials.public_key`、`auth_challenges.challenge` 等機敏欄位同一層級），不做應用層額外封裝加密（對齊 CLAUDE.md「加密/備份：TDE 全庫加密」的既有安全姿態）。
+
+| 欄位 | 型別 | Null | 預設 | 說明 |
+|---|---|---|---|---|
+| `key_pk` | BIGINT IDENTITY | 否 | | 內部 PK |
+| `kid` | NVARCHAR(64) | 否 | | JWKS/JWT header 的 key id，唯一。首次產生時取 `fido.session-jwt.kid` 設定值（若非空）否則自動產生 `sk_<yyyyMMdd>_<短亂數>` |
+| `algorithm` | NVARCHAR(20) | 否 | 'ES256' | CHECK IN ('ES256')；v1 僅 ES256 |
+| `curve` | NVARCHAR(20) | 否 | 'P-256' | 曲線標示（記錄用） |
+| `private_key` | VARBINARY(1024) | 否 | | EC P-256 私鑰，PKCS#8 DER **【DB18】** |
+| `public_key` | VARBINARY(512) | 否 | | 對應公鑰，X.509 SubjectPublicKeyInfo DER，供 JWKS 端點取 x/y 座標發布 |
+| `status` | NVARCHAR(20) | 否 | 'ACTIVE' | CHECK IN ('ACTIVE','RETIRED')。**同時最多一把 ACTIVE**（filtered unique index 保證） |
+| `created_at` | DATETIME2(3) | 否 | SYSUTCDATETIME() | |
+| `retired_at` | DATETIME2(3) | 是 | | 輪替後轉 RETIRED 的時間 |
+
+**鍵/索引**：PK `key_pk`；UNIQUE `kid`；**filtered unique** `UX_signkey_one_active` ON (`status`) WHERE `status='ACTIVE'`（保證至多一把 ACTIVE，兼作多實例首次啟動並發產生金鑰的競態防護）。
+
+**啟動 / 載入行為（dev-engineer 實作）**：
+1. 應用啟動時 `JwtService` 讀取唯一的 `ACTIVE` 列，反序列化 `private_key`(PKCS#8)/`public_key`(X.509) 為 `KeyPair`，作為簽發用金鑰；`kid`、公鑰皆以此列為權威（不再從 `fido.session-jwt.kid` 讀取用於簽章 header，設定值僅供首次產生時的種子）。
+2. 若無任何 `ACTIVE` 列（全新資料庫首次啟動）：自動產生一組 EC P-256 金鑰對、指定 `kid`、以 `status='ACTIVE'` INSERT，再載入使用。**多實例並發首啟**時，`UX_signkey_one_active` 保證只有一個實例 INSERT 成功，其餘捕捉唯一鍵衝突後改讀既有 `ACTIVE` 列——最終所有實例共用同一把金鑰。
+3. 後續啟動一律載入既有 `ACTIVE` 金鑰，**不再重新產生**。
+
+**JWKS 發布**：`JwtService.jwks()` 回傳**所有** `ACTIVE` + `RETIRED` 列的公鑰（`JwkSet` 本就是 `List<Jwk>`，介面不變）。單一有效金鑰時即長度 1 的清單；輪替後短暫並存新舊公鑰，讓過渡期間舊 `kid` 簽出、尚未過期（≤120 秒）的 JWT 仍可驗簽。
+
+**輪替範圍（v1 決策）**：v1 只做**持久化 + 單一有效金鑰**，**不做**自動排程輪替、不做強制重疊窗口管理。schema 已預留 `status`/`retired_at` 使日後輪替免改表。手動輪替經 admin CLI 的 `rotate-signing-key` 指令（見 CLAUDE.md 決策表）：把現行 `ACTIVE` 標為 `RETIRED`+`retired_at`、產生並 INSERT 新 `ACTIVE`。因 JWT 僅 120 秒效期，RETIRED 公鑰於輪替後約 2 分鐘即無 JWT 需其驗簽，運維可隨時 DELETE 已無用的 RETIRED 列（非必要、不影響正確性）。
+
+**【DB18】** 私鑰以 PKCS#8 DER、公鑰以 X.509 SPKI 直接存 `VARBINARY`（對齊 DB6：二進位存 raw），不存 PEM/base64 字串。理由：`KeyFactory`/`X509EncodedKeySpec`/`PKCS8EncodedKeySpec` 可零轉換往返，JWKS 端點自 X.509 公鑰取 EC 座標即可。私鑰保護沿用 TDE，不加應用層封裝（避免引入另一組須管理的封裝金鑰，與 TDE 職責重疊）。
+
+```sql
+CREATE TABLE dbo.signing_keys (
+    key_pk       BIGINT IDENTITY(1,1) NOT NULL,
+    kid          NVARCHAR(64)  NOT NULL,
+    algorithm    NVARCHAR(20)  NOT NULL CONSTRAINT DF_signkey_alg DEFAULT 'ES256',
+    curve        NVARCHAR(20)  NOT NULL CONSTRAINT DF_signkey_curve DEFAULT 'P-256',
+    private_key  VARBINARY(1024) NOT NULL,
+    public_key   VARBINARY(512)  NOT NULL,
+    status       NVARCHAR(20)  NOT NULL CONSTRAINT DF_signkey_status DEFAULT 'ACTIVE',
+    created_at   DATETIME2(3)  NOT NULL CONSTRAINT DF_signkey_created DEFAULT SYSUTCDATETIME(),
+    retired_at   DATETIME2(3)  NULL,
+    CONSTRAINT PK_signing_keys PRIMARY KEY (key_pk),
+    CONSTRAINT UQ_signkey_kid UNIQUE (kid),
+    CONSTRAINT CK_signkey_status CHECK (status IN ('ACTIVE','RETIRED')),
+    CONSTRAINT CK_signkey_alg CHECK (algorithm IN ('ES256'))
+);
+CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE status = 'ACTIVE';
+```
+
+---
+
+## 11. 索引與外鍵總表
 
 | 表 | PK | UNIQUE | 其他索引 | FK |
 |---|---|---|---|---|
@@ -434,14 +490,16 @@ CREATE INDEX IX_appbind_tenant_status ON dbo.tenant_app_bindings (tenant_id, sta
 | auth_challenges | challenge_pk | ceremony_id | expires_at, (tenant_id,status) | tenant_id→tenants, user_ref_id→fido_user_ref |
 | audit_log | audit_id | — | (tenant_id,user_ref_id,created_at), created_at, (tenant_id,event_type,created_at) | tenant_id→tenants, user_ref_id→fido_user_ref |
 | tenant_app_bindings | app_binding_pk | binding_uid, (tenant_id,package_name,sha256_cert_fingerprint) | (tenant_id,status) | tenant_id→tenants |
+| signing_keys | key_pk | kid, **filtered** (status) WHERE status='ACTIVE' | — | —（平台級，無 FK） |
 
 ---
 
-## 11. 資料保留與清理排程
+## 12. 資料保留與清理排程
 
 - **【DB11】** `auth_challenges`：challenge 為一次性短生命週期。建議 SQL Agent Job 每分鐘將 `expires_at < now` 的 PENDING 標為 EXPIRED，並每日刪除 `created_at < now-1天` 的列（保留少量供近期除錯即可，非稽核來源）。
 - **【DB12】** `audit_log`：保留 1 年（對齊 CLAUDE.md）。建議按月做資料分割（partition by `created_at` 月份）或 SQL Agent Job 每日刪除 `created_at < now-365天`。若採 partition，可用 SWITCH + DROP 高效清理。
 - `tenant_app_bindings`：**組態性資料，無自動清理**。與 `tenants` 同生命週期，撤銷採軟刪除（`status='REVOKED'`）長期保留供稽核；僅隨租戶整體下線時一併人工處理。
+- `signing_keys`：**組態性資料，無自動清理排程**。正常只有一把 `ACTIVE`。手動輪替後產生的 `RETIRED` 列於約 2 分鐘（>JWT 120 秒效期）後即無 JWT 需其驗簽，運維可隨時手動 DELETE，非必要。
 - TDE 全庫加密與定期備份由 devops-engineer 依 CLAUDE.md 設定，不在本 schema 文件內展開。
 
 ---
@@ -467,5 +525,6 @@ CREATE INDEX IX_appbind_tenant_status ON dbo.tenant_app_bindings (tenant_id, sta
 | DB15 | 單一資料庫單一 `dbo` schema，多租戶以 `tenant_id` 邏輯隔離 | 中小規模、運維簡單；非每租戶一 schema |
 | DB16 | `audit_log.device_pk` 不設硬 FK | 避免清理/軟刪動作被稽核列連動限制 |
 | DB17 | 新增第七張表 `tenant_app_bindings` 存租戶授權 App 簽章指紋（origin-binding.md OB3 選項 B，已拍板；未採選項 A 的 `tenants` JSON 欄位） | 可逐筆稽核/輪替 App 授權、支援一租戶多 App、指紋建唯一索引防重複；已回填 CLAUDE.md 六張→七張 |
+| DB18 | 新增第八張表 `signing_keys` 持久化 session JWT 簽章金鑰（私鑰 PKCS#8、公鑰 X.509 直存 VARBINARY，TDE 保護，不加應用層封裝）；filtered unique index 保證至多一把 ACTIVE 並兼作多實例首啟競態防護 | 解決記憶體金鑰重啟即換、多實例 JWKS 不一致的部署缺口；DB 天然支援多實例共享、沿用既有 TDE，優於檔案+部署層同步方案。已回填 CLAUDE.md 七張→八張 |
 
 > 待複核項：DB2（API Key 雜湊儲存）、DB14（1:1 憑證裝置關係）、DB15（單 schema 邏輯隔離）屬會影響實作與運維的取捨，建議優先確認。DB17 已由人類拍板（OB3 選項 B）。複核通過後交接 dev-engineer（JPA 實體，含新 `tenant_app_bindings` 實體）與 devops-engineer（建庫腳本、索引、清理 Job、TDE/備份，並重新在 LocalDB 驗證含第七張表的 schema 建置）。

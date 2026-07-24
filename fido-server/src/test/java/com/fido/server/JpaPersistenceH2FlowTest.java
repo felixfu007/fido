@@ -8,6 +8,7 @@ import com.fido.server.domain.AuthChallenge;
 import com.fido.server.domain.BoundDevice;
 import com.fido.server.domain.FidoCredential;
 import com.fido.server.domain.FidoUserRef;
+import com.fido.server.domain.SigningKey;
 import com.fido.server.domain.Tenant;
 import com.fido.server.domain.TenantAppBinding;
 import com.fido.server.domain.enums.AppBindingRevokedReason;
@@ -17,6 +18,7 @@ import com.fido.server.domain.enums.ChallengeStatus;
 import com.fido.server.domain.enums.RecordStatus;
 import com.fido.server.domain.enums.RevokedReason;
 import com.fido.server.domain.enums.SecurityLevel;
+import com.fido.server.domain.enums.SigningKeyStatus;
 import com.fido.server.domain.enums.TenantStatus;
 import com.fido.server.repository.AuditLogRepository;
 import com.fido.server.repository.AuthChallengeRepository;
@@ -30,6 +32,7 @@ import com.fido.server.repository.jpa.JpaAuthChallengeRepository;
 import com.fido.server.repository.jpa.JpaBoundDeviceRepository;
 import com.fido.server.repository.jpa.JpaFidoCredentialRepository;
 import com.fido.server.repository.jpa.JpaFidoUserRefRepository;
+import com.fido.server.repository.jpa.JpaSigningKeyRepository;
 import com.fido.server.repository.jpa.JpaTenantAppBindingRepository;
 import com.fido.server.repository.jpa.JpaTenantRepository;
 import com.fido.server.testsupport.TestKeyAttestationFixtures;
@@ -39,6 +42,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
@@ -55,6 +59,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -115,6 +120,9 @@ class JpaPersistenceH2FlowTest {
 
     @Autowired
     private JpaTenantAppBindingRepository jpaTenantAppBindingRepository;
+
+    @Autowired
+    private JpaSigningKeyRepository jpaSigningKeyRepository;
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final ObjectMapper cborMapper = new ObjectMapper(new CBORFactory());
@@ -499,6 +507,71 @@ class JpaPersistenceH2FlowTest {
         var revokedBindings = appBindingRepository.findByTenantIdAndStatus(savedTenant.getTenantId(), RecordStatus.REVOKED);
         assertThat(revokedBindings).hasSize(1);
         assertThat(revokedBindings.get(0).getRevokedReason()).isEqualTo(AppBindingRevokedReason.KEY_ROTATION);
+    }
+
+    /**
+     * 第八張表 {@code signing_keys}（db-schema.md 第 10 節 / DB18）：證明
+     * {@link JpaSigningKeyRepository} 真的接上 H2，且 {@code UX_signkey_one_active} filtered
+     * unique index 是資料庫層級真實生效的約束（非只有應用層 {@code JwtService} 自律遵守），
+     * 以及輪替流程（RETIRED 舊列 + INSERT 新 ACTIVE 列）與 {@code findAll()} 回傳全部列
+     * （供 JWKS 端點）皆正確運作。
+     *
+     * <p>context 啟動時 {@code JwtService} 建構子已依「全新資料庫首次啟動」情境自動產生並落地
+     * 第一把 ACTIVE 金鑰（見 {@link JwtServiceTest} 的 mock 版本覆蓋同一段邏輯），這裡先確認
+     * 那把金鑰真的在 H2 資料庫裡查得到，再驗證後續的約束/輪替行為。
+     */
+    @Test
+    void signingKeysTableEnforcesSingleActiveKeyAndSupportsRotationAndFindAll() {
+        Optional<SigningKey> bootstrapped = jpaSigningKeyRepository.findActive();
+        assertThat(bootstrapped).isPresent();
+        String bootstrappedKid = bootstrapped.get().getKid();
+
+        // 未先把既有 ACTIVE 列轉為 RETIRED 就插入第二把 ACTIVE 金鑰，應違反
+        // UX_signkey_one_active（真實 H2 filtered unique index，不是應用層模擬）。
+        SigningKey conflictingActive = new SigningKey();
+        conflictingActive.setKid("conflict-kid-" + UUID.randomUUID());
+        conflictingActive.setAlgorithm("ES256");
+        conflictingActive.setCurve("P-256");
+        conflictingActive.setPrivateKey(WebAuthnCeremonyFixtures.randomBytes(48));
+        conflictingActive.setPublicKey(WebAuthnCeremonyFixtures.randomBytes(91));
+        conflictingActive.setStatus(SigningKeyStatus.ACTIVE);
+        conflictingActive.setCreatedAt(Instant.now().truncatedTo(ChronoUnit.MILLIS));
+
+        assertThatThrownBy(() -> jpaSigningKeyRepository.save(conflictingActive))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        // 衝突失敗的插入不應影響既有 ACTIVE 列。
+        assertThat(jpaSigningKeyRepository.findActive()).isPresent();
+        assertThat(jpaSigningKeyRepository.findActive().get().getKid()).isEqualTo(bootstrappedKid);
+
+        // 正常輪替流程（對應 admin CLI rotate-signing-key）：先把既有 ACTIVE 轉 RETIRED，
+        // 再插入新的 ACTIVE，應該成功且兩者並存。
+        SigningKey toRetire = bootstrapped.get();
+        toRetire.setStatus(SigningKeyStatus.RETIRED);
+        toRetire.setRetiredAt(Instant.now().truncatedTo(ChronoUnit.MILLIS));
+        jpaSigningKeyRepository.save(toRetire);
+
+        SigningKey newActive = new SigningKey();
+        String newKid = "rotated-kid-" + UUID.randomUUID();
+        newActive.setKid(newKid);
+        newActive.setAlgorithm("ES256");
+        newActive.setCurve("P-256");
+        newActive.setPrivateKey(WebAuthnCeremonyFixtures.randomBytes(48));
+        newActive.setPublicKey(WebAuthnCeremonyFixtures.randomBytes(91));
+        newActive.setStatus(SigningKeyStatus.ACTIVE);
+        newActive.setCreatedAt(Instant.now().truncatedTo(ChronoUnit.MILLIS));
+        SigningKey savedNewActive = jpaSigningKeyRepository.save(newActive);
+        assertThat(savedNewActive.getKeyPk()).isNotNull();
+
+        assertThat(jpaSigningKeyRepository.findActive()).isPresent();
+        assertThat(jpaSigningKeyRepository.findActive().get().getKid()).isEqualTo(newKid);
+
+        var all = jpaSigningKeyRepository.findAll();
+        assertThat(all).extracting(SigningKey::getKid).contains(bootstrappedKid, newKid);
+        assertThat(all)
+                .filteredOn(k -> bootstrappedKid.equals(k.getKid()))
+                .extracting(SigningKey::getStatus)
+                .containsExactly(SigningKeyStatus.RETIRED);
     }
 
     private void submitAssertion(byte[] credentialId, PrivateKey credentialPrivateKey, String ceremonyId,
