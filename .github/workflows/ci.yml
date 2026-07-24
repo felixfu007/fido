@@ -1,0 +1,150 @@
+name: CI
+
+# 涵蓋範圍：fido-server / shopping-site-reference 兩個 Spring Boot + Maven 專案的單元測試、
+# android-credential-provider 的 Gradle JVM 單元測試（prod/poc 兩個 flavor），以及一個獨立的
+# 跨行程端對端整合測試 job（見 cross-process-e2e）。SQL Server 正式環境建置（infra/sql/）
+# 不在此 CI 範圍內，維持全地端部署決策由 devops 另行手動執行。
+#
+# Android instrumented/連線模擬器的測試（connectedAndroidTest 等）不在此 CI 範圍內：GitHub
+# Actions 一般 runner 沒有可用的 Android 模擬器/實機，且專案的 PoC 驗證紀錄本就是以人工方式
+# 在實機/模擬器上完成（見 CLAUDE.md「目前階段」）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fido-server:
+    name: fido-server (Maven tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: mvn test
+        working-directory: fido-server
+        run: mvn -B test
+
+  shopping-site-reference:
+    name: shopping-site-reference (Maven tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: mvn test
+        working-directory: shopping-site-reference
+        run: mvn -B test
+
+  android-unit-tests:
+    name: android-credential-provider (Gradle JVM unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # 確保 sdkmanager / licenses 就緒；compileSdk 35 platform 由 AGP 依此設定自動下載
+      # （GitHub-hosted runner 的預設 Android SDK 授權已由此 action 接受）。
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: android-credential-provider
+
+      - name: chmod +x gradlew
+        run: chmod +x android-credential-provider/gradlew
+
+      # 只跑 JVM 單元測試（testXxxUnitTest），不含 connectedAndroidTest／instrumented 測試——
+      # CI runner 沒有可用的模擬器/實機。目前 prod/poc 兩個 product flavor 共用同一份
+      # src/test 原始碼（沒有 src/testProd、src/testPoc 各自的 flavor-specific source set），
+      # 兩個 task 因此會編譯/執行同一組測試；兩者都跑是為了讓未來一旦有人真的新增
+      # flavor-specific 測試時 CI 能自動涵蓋到，而非目前就有差異。任務名稱以
+      # `./gradlew tasks --all` 實查確認，非猜測。
+      - name: Unit tests - prod flavor (testProdDebugUnitTest)
+        working-directory: android-credential-provider
+        run: ./gradlew :app:testProdDebugUnitTest --console=plain
+
+      - name: Unit tests - poc flavor (testPocDebugUnitTest)
+        working-directory: android-credential-provider
+        run: ./gradlew :app:testPocDebugUnitTest --console=plain
+
+      # testcaller/ 模組刻意不在此排除範圍：它是「假裝自己是購物網站原生 App」的獨立驗證用
+      # APK（見 android-credential-provider/testcaller/build.gradle.kts 檔頭註解），只有
+      # src/main、沒有 src/test，其存在目的是手動安裝到模擬器/實機上驅動真實
+      # CredentialManager UI 做人工比對，並非 JVM 可執行的自動化測試，故 CI 無事可做，略過。
+
+  cross-process-e2e:
+    name: Cross-process E2E (fido-server <-> shopping-site-reference, real HTTP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 刻意不設 needs：本 job 自行從原始碼建置兩邊的 jar，不依賴另外兩個單元測試 job 的產物，
+    # 讓三者可平行執行、加快整體 CI 時間。此 job 綁定真實埠號（8443 / 18081）但 GitHub-hosted
+    # runner 每次都是全新、互不共用的 VM，不會有埠號衝突風險，因此比照要求「預設在每次
+    # push/PR 都跑」，不設為僅手動/排程觸發。
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # 建置 fido-server 的可執行 jar（測試已在 fido-server job 跑過，這裡略過以節省時間）。
+      - name: Package fido-server jar
+        working-directory: fido-server
+        run: mvn -B -DskipTests package
+
+      # CrossProcessE2EManualRunner 本身以及它依賴的
+      # com.fido.server.testsupport.TestKeyAttestationFixtures / WebAuthnCeremonyFixtures
+      # 都在 src/test 下，一般 `package` 不會編譯／打進 jar，需另外 test-compile。
+      - name: Compile fido-server test classes (runner + fixtures)
+        working-directory: fido-server
+        run: mvn -B test-compile
+
+      - name: Build fido-server test-scope classpath file
+        working-directory: fido-server
+        run: mvn -B dependency:build-classpath -Dmdep.outputFile=cp.txt -Dmdep.includeScope=test
+
+      # 建置 shopping-site-reference 的可執行 jar（測試已在其自己的 job 跑過）。
+      - name: Package shopping-site-reference jar
+        working-directory: shopping-site-reference
+        run: mvn -B -DskipTests package
+
+      # 真的啟動兩個獨立 JVM 行程（非 MockMvc/@SpringBootTest），跑一次完整
+      # 註冊 -> 登入 -> JWT 驗證 -> 裝置管理 -> IDOR 反例流程。CrossProcessE2EManualRunner.main
+      # 在任一項驗證失敗時會將 anyFailure 設為 true 並以 System.exit(1) 結束，成功則自然返回、
+      # exit code 0；由 `java` 指令的結束碼直接反映到這個 step、進而讓 job 失敗，不需額外解析。
+      - name: Run CrossProcessE2EManualRunner
+        run: |
+          set -euo pipefail
+          CP="fido-server/target/classes:fido-server/target/test-classes:$(cat fido-server/cp.txt)"
+          java -cp "$CP" com.fido.server.e2e.CrossProcessE2EManualRunner

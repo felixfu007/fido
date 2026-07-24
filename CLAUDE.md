@@ -78,8 +78,25 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
 記於上方「目前階段」相關段落（CSRF/cookie 見購物網站串接參考範例段落；啟動器畫面見「啟動器畫面決策」
 段落）。`externalUserId` DTO 欄位一項則是拍板保留、非「尚未處理」，理由同見上方段落。
 
+CI pipeline（原本盤點出的缺口之一）已建立，見下方「CI pipeline」段落。SQL Server 正式環境套用
+（`infra/sql/` 腳本尚未在真正的 SQL Server 實例上驗證過）因目前無可用環境，暫緩處理，非本次範圍。
+
 新的待辦事項出現時，請沿用既有慣例：在此列出簡短條目，完成後移除並把細節併入「目前階段」對應段落，
 不要讓已完成項目長期留在本清單。
+
+### CI pipeline
+
+`.github/workflows/ci.yml` 已建立，四個平行 job：`fido-server`（`mvn test`，36/36 通過）、
+`shopping-site-reference`（`mvn test`，43/43 通過）、`android-unit-tests`（Gradle JVM 單元測試，
+`testProdDebugUnitTest`/`testPocDebugUnitTest` 皆跑，27/27 通過——目前 prod/poc 共用同一份
+`src/test`，尚無 flavor-specific 測試，兩個 task 現階段會跑到同一組測試，兩者都跑是為未來新增
+flavor-specific 測試預留涵蓋）、`cross-process-e2e`（建置兩邊 jar 後執行既有的
+`CrossProcessE2EManualRunner`，真的起兩個獨立 JVM 跑一次完整註冊→登入→JWT 驗證→裝置管理→IDOR
+反例流程，15 項檢查全過）。`android-credential-provider/testcaller/` 模組刻意不排入 CI（只有
+`src/main`、無 `src/test`，本質是人工驅動的驗證用 APK，非自動化測試目標）。SQL Server 相關
+（`infra/sql/`）不在此 CI 範圍內。devops-engineer 建置、qa-engineer 獨立重跑全部驗證項目複核
+（含發現並修正一處 YAML 註解與實際原始碼不符：宣稱 prod/poc 測試集不同，經查證兩者其實共用同一份
+`src/test`，已更正註解措辭，不影響 CI 行為本身）。
 
 ## 團隊分工（Claude Code Subagents）
 
