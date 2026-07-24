@@ -22,8 +22,10 @@
 | API 版本策略 | URI 路徑版本 `/api/v1` |
 | API 認證 Header | `X-API-Key`（必，決定租戶）+ 選用 `X-Tenant-Id`（交叉檢查）/ `X-Request-Id`（追蹤） |
 | 租戶速率限制 | 每租戶 100 TPS，超過回 `429` + `Retry-After` |
+| 正式租戶開通 | 目前無管理後台/開通工具，僅 `DevDataSeeder`（開發用，種入公開字串 API Key 的 `Demo Shop` 示範租戶）。正式租戶採人工方式直接 `INSERT tenants`（API Key 以 SHA-256 雜湊 + 12 字前綴儲存，規則見 `ApiKeyService`），與 `docs/origin-binding.md` OB6 的人工 onboarding 一致。**上線前必須關閉 `DevDataSeeder`**，否則正式環境會殘留可公開查到的示範租戶 API Key；已列入 `docs/vendor/environment-setup-guide.md` 部署檢查清單。 |
 | Session JWT 演算法 | ES256（EC P-256），公鑰經 JWKS 端點提供 |
 | Session JWT 有效期 | 120 秒 |
+| Session JWT 簽章金鑰持久化 | **骨架限制，尚未解決**：`JwtService` 目前在每次程序啟動時於記憶體產生新的 EC P-256 金鑰對，重啟即換金鑰、多實例間也不共享同一把鑰匙。單一實例部署不受影響（同一把鑰匙簽發與驗證），但正式環境若跑多實例（負載平衡/高可用）會導致 JWKS 端點回傳的公鑰因實例而異、部分請求驗證失敗。屬部署層待解事項，非本次範圍，已如實寫入 `docs/vendor/maintenance-guide.md`、`docs/vendor/technical-limitations.md` 供採用廠商評估；正式解法（例如金鑰持久化到資料庫/KMS 並支援輪替）留待有實際多實例部署需求時再設計。 |
 | 防帳號列舉策略 | 登入與裝置管理 API 一律採 200 + 空清單 / 冪等 no-op，不用 404 洩漏使用者或裝置是否存在 |
 | 傳輸安全 | TLS + API Key |
 | WebAuthn origin 綁定 / 存取情境 | v1 provider 一併支援「瀏覽器存取」與「購物網站原生 App 直呼 Credential Manager」兩情境；原生 App 情境對每個租戶採 **opt-in**（租戶須完成 `assetlinks.json` Digital Asset Links onboarding + 平台登錄 App 簽章指紋至 `tenant_app_bindings`）。origin 由 provider 從呼叫方動態、經驗證取得（不寫死），伺服器以 `expected_origin`(web) ∪ `tenant_app_bindings`(app) 允許清單把關，不符回 `403 ORIGIN_NOT_ALLOWED`。詳見 `docs/origin-binding.md` |
