@@ -75,8 +75,8 @@ public final class CrossProcessE2EManualRunner {
 
         Path fidoDir = repoRoot.resolve("fido-server");
         Path shopDir = repoRoot.resolve("shopping-site-reference");
-        Path fidoJar = fidoDir.resolve("target/fido-server-0.1.0-SNAPSHOT.jar");
-        Path shopJar = shopDir.resolve("target/shopping-site-reference-0.1.0-SNAPSHOT.jar");
+        Path fidoJar = fidoDir.resolve("target/fido-server-1.0.0.jar");
+        Path shopJar = shopDir.resolve("target/shopping-site-reference-1.0.0.jar");
         if (!Files.exists(fidoJar) || !Files.exists(shopJar)) {
             throw new IllegalStateException("找不到已建置的 jar，請先在兩個模組各自執行 `mvn -DskipTests package`。"
                     + " fidoJar=" + fidoJar + " (exists=" + Files.exists(fidoJar) + ")"

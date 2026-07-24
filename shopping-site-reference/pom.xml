@@ -13,7 +13,7 @@
 
     <groupId>com.shop.reference</groupId>
     <artifactId>shopping-site-reference</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <name>shopping-site-reference</name>
     <description>
         「採用 FIDO 登入的購物網站」參考串接範例（非正式產品，非本專案交付範圍內的真實電商系統）。

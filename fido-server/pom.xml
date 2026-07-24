@@ -13,7 +13,7 @@
 
     <groupId>com.fido.server</groupId>
     <artifactId>fido-server</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <name>fido-server</name>
     <description>
         FIDO/FIDO2 驗證伺服器 — 情境 A（標準 WebAuthn，同裝置）。
