@@ -71,5 +71,15 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_signkey_one_active' A
     CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE status = 'ACTIVE';
 GO
 
+-- cross_device_sessions（db-schema.md 第 11 節 / DB19）
+-- (tenant_id,status)：租戶維度查詢/管理當前 session 狀態。
+-- expires_at：供 006_retention_cleanup_jobs.sql 的過期標記/清理排程使用（比照 auth_challenges）。
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_xdev_tenant_status' AND object_id = OBJECT_ID(N'dbo.cross_device_sessions'))
+    CREATE INDEX IX_xdev_tenant_status ON dbo.cross_device_sessions (tenant_id, status);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_xdev_expires' AND object_id = OBJECT_ID(N'dbo.cross_device_sessions'))
+    CREATE INDEX IX_xdev_expires ON dbo.cross_device_sessions (expires_at);
+GO
+
 PRINT N'003_create_indexes.sql 執行完成：次要索引已建立/確認存在。';
 GO

@@ -94,9 +94,28 @@ public class JwtService {
      */
     public IssuedToken issue(String rpId, String externalUserId, String tenantUid,
                               String credentialIdBase64Url, String deviceIdString) {
+        return issue(rpId, externalUserId, tenantUid, credentialIdBase64Url, deviceIdString, List.of());
+    }
+
+    /**
+     * 帶額外 {@code amr} 值的版本，供跨裝置 QR 登入（情境三）使用：api-contract.md §1.3 / D17
+     * 拍板該路徑簽發的 session JWT 需在 {@code ["fido","hwk"]} 之外多帶一個 {@code "xdev"}，
+     * 讓下游（購物網站後端）辨識「本次 session 是否經 cross-device 較弱路徑取得」以要求
+     * step-up。**同裝置流程呼叫 5 參數版本（{@code extraAmr} 隱含空清單）行為完全不變**，
+     * 仍簽出 {@code amr=["fido","hwk"]}。
+     *
+     * @param extraAmr 附加於 {@code ["fido","hwk"]} 之後的額外 amr 值；{@code null} 視同空清單。
+     */
+    public IssuedToken issue(String rpId, String externalUserId, String tenantUid,
+                              String credentialIdBase64Url, String deviceIdString, List<String> extraAmr) {
         Instant now = Instant.now();
         Instant exp = now.plusSeconds(properties.getSessionJwt().getTtlSeconds());
         String jti = "jti_" + UUID.randomUUID();
+
+        List<String> amr = new java.util.ArrayList<>(List.of("fido", "hwk"));
+        if (extraAmr != null) {
+            amr.addAll(extraAmr);
+        }
 
         String token = Jwts.builder()
                 .header().keyId(activeKey.kid()).and()
@@ -106,7 +125,7 @@ public class JwtService {
                 .claim("tid", tenantUid)
                 .claim("cid", credentialIdBase64Url)
                 .claim("did", deviceIdString)
-                .claim("amr", List.of("fido", "hwk"))
+                .claim("amr", amr)
                 .claim("auth_time", now.getEpochSecond())
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(exp))

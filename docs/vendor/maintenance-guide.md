@@ -11,7 +11,7 @@
 | 對象 | 內容 | 對應建置腳本 |
 |---|---|---|
 | `fido-server` 應用 | Spring Boot jar，無狀態（唯一的行程內狀態是 session JWT 簽章金鑰，見第 4 節） | — |
-| SQL Server `FidoServerDb` | 七張核心表，TDE 全庫加密 | `001`–`004` |
+| SQL Server `FidoServerDb` | 九張核心表，TDE 全庫加密 | `001`–`004` |
 | 備份 Agent Job | 完整 / 差異 / 交易記錄備份 | `005` |
 | 清理 Agent Job | challenge 過期標記 / 清除、`audit_log` 1 年保留清理 | `006` |
 
@@ -88,7 +88,7 @@ java -jar fido-server.jar --spring.profiles.active=admin-cli --fido.admin.comman
 
 ## 5. 稽核紀錄保留與清理排程
 
-- 稽核事件寫在 `audit_log` 表（不是應用日誌），保留 **1 年**。事件類型包含 `REG_SUCCESS`、`AUTH_SUCCESS`、`AUTH_FAIL`、`AUTO_REVOKE_COUNTER_REGRESSION`、`DEVICE_REVOKED_BY_USER`、`DEVICE_REVOKE_NOOP` 等。
+- 稽核事件寫在 `audit_log` 表（不是應用日誌），保留 **1 年**。事件類型包含 `REG_SUCCESS`、`AUTH_SUCCESS`、`AUTH_FAIL`、`AUTO_REVOKE_COUNTER_REGRESSION`、`DEVICE_REVOKED_BY_USER`、`DEVICE_REVOKE_NOOP`，以及跨裝置 QR 登入（情境三）的 `XDEV_SESSION_CREATED`、`XDEV_CLAIMED`、`XDEV_CONFIRMED`、`XDEV_CONSUMED` 等。跨裝置事件的 `detail` JSON 內含 `originType='CROSS_DEVICE_QR'` 與 `proximityMismatch`（true/false）。
 - 清理由 `006_retention_cleanup_jobs.sql` 建立的三個 Agent Job 處理：
 
 | Job 名稱 | 頻率 | 動作 |
@@ -138,6 +138,7 @@ java -jar fido-server.jar --spring.profiles.active=admin-cli --fido.admin.comman
 | challenge 逾期率（`CHALLENGE_EXPIRED` 比例） | 使用者完成 ceremony 前逾時的比例 | 明顯上升 → 前後端延遲 / 網路 / 時鐘問題 |
 | 異常自動撤銷率（`AUTO_REVOKE_COUNTER_REGRESSION`） | sign counter 倒退次數 | 上升 → **安全可疑訊號**，可能有金鑰複製嘗試，資安應介入 |
 | `ATTESTATION_CHAIN_INVALID` / `HARDWARE_SECURITY_NOT_MET` 比例 | 大量裝置無法通過硬體驗證 | 突增 → 可能是特定 OEM 相容性問題（見技術限制手冊 OEM 覆蓋）或設定誤改 |
+| 跨裝置 QR 登入 proximity 不符率（`audit_log.detail.proximityMismatch=true` 佔 `XDEV_CONFIRMED` 比例） | 桌機/手機出口 IP 不一致的比例（見第 11 節） | 明顯偏高 → 可能是正常誤判（行動網路 vs Wi-Fi）也可能是中繼攻擊；短時間單一租戶/使用者暴增 → 安全可疑，資安評估 |
 | `INTERNAL_ERROR`（500）率 | 伺服器內部異常 | 任何持續 500 → 查日誌 |
 | SQL Server Agent Job 狀態 | 備份 / 清理 Job 是否失敗或停用 | Job 失敗 → 告警（尤其備份 Job） |
 | 資料庫連線 / 交易記錄檔成長 | DB 健康度 | 記錄檔異常成長 → 查交易記錄備份是否正常 |
@@ -180,3 +181,27 @@ v1 設計目標為**中小規模**（對齊 CLAUDE.md）：
 - [ ] TDE 憑證到期提醒已設定，`.cer`/`.pvk` 異地備份完好
 - [ ] 每季演練一次還原
 - [ ] 安全開關（attestation real / poc-trust off / dev-seed off）維持正確
+- [ ] （若已啟用跨裝置 QR 登入）監控 proximity 不符率（第 11 節）
+
+---
+
+## 11. 跨裝置 QR 登入（情境三）的 proximity 警示與維運
+
+> 對應能力說明技術限制手冊第 2.2 節、串接手冊第 11 節、合約 `../api-contract.md` §3.4。**實作狀態**：架構已拍板、規格已定，功能尚在實作中；本節為上線後維運指引，功能到位後適用。
+
+### 11.1 proximity 檢查是「只警示、不阻擋」（平台決策 S2）
+
+- 跨裝置 QR 登入時，`fido-server` 會比對「桌機瀏覽器出口 IP」與「手機直連出口 IP」是否一致（proximity 檢查）。
+- **平台拍板採警示制**：兩者不一致時**不會擋下登入**，只在 `audit_log`（`detail.proximityMismatch=true`）與回應中標記異常，登入照常完成。
+- 這代表 proximity **不能被當成阻擋遠端中繼攻擊的機制**——它只提供事後可追蹤的訊號。防釣魚的實際保護，主要落在「使用範圍限縮（敏感操作要求 step-up）」這一層（串接手冊第 11.3 節）。
+
+### 11.2 維運人員可以做什麼
+
+- **追蹤異常頻率**：以 `audit_log` 查詢 `event_type='XDEV_CONFIRMED'` 且 `detail.proximityMismatch=true` 的比例與趨勢（依租戶、依使用者）。偶發不符多屬正常誤判（手機走行動網路、桌機走 Wi-Fi；企業/校園多重出口 NAT）。
+- **辨識可疑樣態**：單一使用者短時間內大量 proximity 不符、或某租戶不符率異常飆高，應升級給資安評估是否有中繼攻擊嘗試。
+- **協助個別租戶**：若某租戶回報其使用者族群誤判率過高造成困擾，可協助檢視其網路拓撲、或（見下）評估未來的每租戶策略調整。
+
+### 11.3 後續可擴充項（本版本未實作）
+
+- 目前 proximity 政策為**全平台一致的警示制**，**沒有**每租戶可切換為 strict（不符即拒）的設定機制。
+- 若未來有租戶明確要求更強防護、且能接受其使用者族群的誤判率，可評估擴充為「**每租戶可設定 proximity 政策（warn / strict）**」。此為 systems-analyst 標記的後續可擴充方向，**本版本刻意不實作**（擁有者本次選定全平台警示制）。需要時請提報平台營運方走架構調整流程，不要在維運層自行以資料庫改動模擬此行為。

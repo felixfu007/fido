@@ -6,6 +6,9 @@ import com.shop.reference.fidoclient.dto.AuthenticationOptionsRequest;
 import com.shop.reference.fidoclient.dto.AuthenticationOptionsResponse;
 import com.shop.reference.fidoclient.dto.AuthenticationResultRequest;
 import com.shop.reference.fidoclient.dto.AuthenticationResultResponse;
+import com.shop.reference.fidoclient.dto.CrossDeviceStartRequest;
+import com.shop.reference.fidoclient.dto.CrossDeviceStartResponse;
+import com.shop.reference.fidoclient.dto.CrossDeviceStatusResponse;
 import com.shop.reference.fidoclient.dto.DeviceListResponse;
 import com.shop.reference.fidoclient.dto.DeviceRevokeResponse;
 import com.shop.reference.fidoclient.dto.FidoErrorResponse;
@@ -85,6 +88,26 @@ public class FidoServerClient {
         RestClient.RequestBodySpec spec = restClient.post().uri("/api/v1/authentication/result");
         applyAuthHeaders(spec);
         return spec.body(request).retrieve().body(AuthenticationResultResponse.class);
+    }
+
+    /** 對應 docs/api-contract.md §3.4.A：由購物網站後端發起，建立跨裝置 QR 登入 session。 */
+    public CrossDeviceStartResponse crossDeviceStart(CrossDeviceStartRequest request) {
+        RestClient.RequestBodySpec spec = restClient.post().uri("/api/v1/authentication/cross-device/sessions");
+        applyAuthHeaders(spec);
+        return spec.body(request).retrieve().body(CrossDeviceStartResponse.class);
+    }
+
+    /**
+     * 對應 docs/api-contract.md §3.4.D：由購物網站後端代桌機輪詢跨裝置 QR 登入狀態 / 取
+     * session JWT。{@code desktopClientIp} 依合約「query/header 皆可」，本實作採 query 參數。
+     */
+    public CrossDeviceStatusResponse crossDeviceStatus(String xdevId, String desktopClientIp) {
+        RestClient.RequestHeadersSpec<?> spec = restClient.get().uri(uriBuilder -> uriBuilder
+                .path("/api/v1/authentication/cross-device/sessions/{xdevId}/status")
+                .queryParam("desktopClientIp", desktopClientIp)
+                .build(xdevId));
+        applyAuthHeaders(spec);
+        return spec.retrieve().body(CrossDeviceStatusResponse.class);
     }
 
     public DeviceListResponse listDevices(String externalUserId, String status, int limit) {

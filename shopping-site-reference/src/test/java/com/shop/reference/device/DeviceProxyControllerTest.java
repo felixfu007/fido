@@ -160,4 +160,41 @@ class DeviceProxyControllerTest {
                 .andExpect(status().isTooManyRequests())
                 .andExpect(jsonPath("$.error.code").value("RATE_LIMITED"));
     }
+
+    /**
+     * 對應 docs/api-contract.md §1.3 / D17 與 docs/vendor/api-integration-guide.md §11.3 的
+     * {@code amr} step-up 示範：目前登入 session 若是經跨裝置 QR 登入（情境三）取得，撤銷裝置
+     * 這種敏感操作必須被拒絕（403 {@code STEP_UP_REQUIRED}），不可直接放行——見
+     * {@link DeviceProxyController#revoke} Javadoc 與
+     * {@link com.shop.reference.session.StepUpRequiredException}。
+     */
+    @Test
+    void revoke_crossDeviceLoginSession_isRejectedWithStepUpRequired() throws Exception {
+        ShopSession crossDeviceSession = new ShopSession(SESSION_ID, LOGGED_IN_USER, null, null, true, Instant.now());
+        when(shopSessionService.requireSession(SESSION_ID)).thenReturn(crossDeviceSession);
+        when(shopSessionService.resolveExternalUserId(eq(crossDeviceSession), isNull())).thenReturn(LOGGED_IN_USER);
+
+        mockMvc.perform(delete("/shop/api/fido/devices/dev-1").with(csrf()).cookie(sessionCookie()))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("STEP_UP_REQUIRED"));
+
+        org.mockito.Mockito.verify(fidoServerClient, org.mockito.Mockito.never()).revokeDevice(
+                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+    }
+
+    /**
+     * 正向對照組：同裝置登入（{@code crossDeviceLogin=false}，既有
+     * {@link #mockLoggedIn()} 建立的 session 即是）撤銷裝置應正常放行，行為與加入 step-up
+     * 檢查前完全一致（見 {@link #revoke_loggedIn_success_returnsRevokedStatus()}）。
+     */
+    @Test
+    void revoke_sameDeviceLoginSession_isAllowedThrough() throws Exception {
+        mockLoggedIn();
+        when(fidoServerClient.revokeDevice(LOGGED_IN_USER, "dev-1"))
+                .thenReturn(new DeviceRevokeResponse("dev-1", "REVOKED", "2026-07-23T10:00:00Z"));
+
+        mockMvc.perform(delete("/shop/api/fido/devices/dev-1").with(csrf()).cookie(sessionCookie()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REVOKED"));
+    }
 }

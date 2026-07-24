@@ -30,6 +30,12 @@ public class JpaAuthChallengeRepository implements AuthChallengeRepository {
     }
 
     @Override
+    @Transactional(readOnly = true)
+    public Optional<AuthChallenge> findByChallengePk(Long challengePk) {
+        return delegate.findById(challengePk).map(JpaAuthChallengeRepository::toDomain);
+    }
+
+    @Override
     @Transactional
     public AuthChallenge save(AuthChallenge challenge) {
         AuthChallengeEntity entity = toEntity(challenge);

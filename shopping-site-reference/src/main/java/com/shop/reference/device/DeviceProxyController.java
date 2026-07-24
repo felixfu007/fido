@@ -5,6 +5,7 @@ import com.shop.reference.fidoclient.dto.DeviceListResponse;
 import com.shop.reference.fidoclient.dto.DeviceRevokeResponse;
 import com.shop.reference.session.ShopSession;
 import com.shop.reference.session.ShopSessionService;
+import com.shop.reference.session.StepUpRequiredException;
 import org.springframework.web.bind.annotation.CookieValue;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -50,6 +51,16 @@ public class DeviceProxyController {
         return fidoServerClient.listDevices(trustedExternalUserId, status, limit);
     }
 
+    /**
+     * 撤銷裝置屬於「敏感操作」，示範 docs/api-contract.md §1.3 / D17（與
+     * docs/vendor/api-integration-guide.md §11.3）要求的 {@code amr} step-up 檢查：如果目前
+     * 登入 session 是經跨裝置 QR 登入（情境三）取得
+     * （{@link ShopSession#crossDeviceLogin()}，來源為
+     * {@link com.shop.reference.authentication.jwt.ValidatedFidoSession#isCrossDeviceLogin()}），
+     * 一律拒絕、要求使用者先在同裝置重新驗證，**不可**直接放行撤銷（見
+     * {@link com.shop.reference.session.StepUpRequiredException} Javadoc 說明責任邊界）。
+     * 同裝置登入（{@code crossDeviceLogin=false}）則正常放行，行為與此檢查加入前完全一致。
+     */
     @DeleteMapping("/{deviceId}")
     public DeviceRevokeResponse revoke(
             @CookieValue(name = ShopSessionService.COOKIE_NAME, required = false) String sessionId,
@@ -57,6 +68,14 @@ public class DeviceProxyController {
             @PathVariable String deviceId) {
         ShopSession session = shopSessionService.requireSession(sessionId);
         String trustedExternalUserId = shopSessionService.resolveExternalUserId(session, externalUserId);
+
+        if (session.crossDeviceLogin()) {
+            throw new StepUpRequiredException(
+                    "此操作（撤銷裝置）需要同裝置重新驗證：目前登入 session 是透過跨裝置 QR 登入"
+                            + "（防釣魚較弱路徑，見 docs/api-contract.md D17）取得，請先透過本機瀏覽器/App"
+                            + "重新完成一次 FIDO 或帳密驗證後再試。");
+        }
+
         return fidoServerClient.revokeDevice(trustedExternalUserId, deviceId);
     }
 }

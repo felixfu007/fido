@@ -121,6 +121,20 @@ public class AuthenticationService {
     }
 
     public AuthenticationResultResponse verifyResult(Tenant tenant, AuthenticationResultRequest request) {
+        return verifyResult(tenant, request, List.of());
+    }
+
+    /**
+     * 帶額外 {@code amr} 值的版本，供跨裝置 QR 登入（情境三，{@code CrossDeviceLoginService}）
+     * 重用本方法的密碼學驗證核心（challenge/origin/rpIdHash/UV/簽章/sign counter，零重寫）時，
+     * 讓簽發的 session JWT 多帶 {@code "xdev"}（api-contract.md §1.3 / D17）。
+     * **同裝置流程（{@code AuthenticationController}）呼叫 2 參數版本，行為完全不變。**
+     *
+     * @param extraAmr 附加於 {@code ["fido","hwk"]} 之後的額外 amr 值；{@code null}/空清單
+     *                 即同裝置流程既有行為。
+     */
+    public AuthenticationResultResponse verifyResult(Tenant tenant, AuthenticationResultRequest request,
+                                                       List<String> extraAmr) {
         AuthChallenge challenge = challengeService.requireValid(request.ceremonyId(), tenant, CeremonyType.AUTHENTICATION);
 
         byte[] credentialIdBytes = decodeB64Url(request.credential().id(), "credential.id");
@@ -235,7 +249,7 @@ public class AuthenticationService {
 
         JwtService.IssuedToken issued = jwtService.issue(
                 tenant.getRpId(), userRef.getExternalUserId(), tenant.getTenantUid().toString(),
-                B64URL.encodeToString(credential.getCredentialId()), device.getDeviceId().toString());
+                B64URL.encodeToString(credential.getCredentialId()), device.getDeviceId().toString(), extraAmr);
 
         auditService.record(tenant.getTenantId(), userRef.getUserRefId(), device.getDevicePk(), "AUTH_SUCCESS",
                 AuditOutcome.SUCCESS, Map.of("jti", issued.jti(), "originType", originCheck.originType().name()));

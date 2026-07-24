@@ -41,9 +41,12 @@
 --      （CREATE UNIQUE INDEX ... WHERE status = 'ACTIVE'），但 H2 2.2.224 剖析器不支援
 --      CREATE INDEX 帶 WHERE 子句，改用「計算欄位 + 一般 UNIQUE 約束」達成等價語意，詳見該
 --      表定義前的說明註解。
+--   7. 新增第九張表 cross_device_sessions（docs/db-schema.md 第 11 節 / DB19，情境三跨裝置
+--      QR 登入 session）：欄位/型別/PK/UQ/CHECK/FK 皆逐字對齊 infra/sql/002_create_tables.sql，
+--      無額外差異（不含 filtered/計算欄位，本表沒有這類約束）。
 --
--- 除上述 6 點外，資料表/欄位/型別長度/NOT NULL/PK/UNIQUE/CHECK/FK 均逐字對齊
--- infra/sql/002_create_tables.sql（= docs/db-schema.md 第 3-10 節權威 DDL）。
+-- 除上述 7 點外，資料表/欄位/型別長度/NOT NULL/PK/UNIQUE/CHECK/FK 均逐字對齊
+-- infra/sql/002_create_tables.sql（= docs/db-schema.md 第 3-11 節權威 DDL）。
 --
 -- 【重要】本檔逐字寫小寫的表名/欄位名（對齊 docs/db-schema.md），但實際連線字串
 -- （application-h2.yml）刻意不加 DATABASE_TO_UPPER=false —— 也就是說 H2 仍會依其預設行為
@@ -228,4 +231,35 @@ CREATE TABLE signing_keys (
     CONSTRAINT CK_signkey_status CHECK (status IN ('ACTIVE','RETIRED')),
     CONSTRAINT CK_signkey_alg CHECK (algorithm IN ('ES256')),
     CONSTRAINT UX_signkey_one_active UNIQUE (active_only_marker)
+);
+
+-- 第九張表：cross_device_sessions（docs/db-schema.md 第 11 節 / DB19）。情境三（跨裝置 QR
+-- transaction confirmation）的登入 session，1:1 包住一列 auth_challenges（challenge_pk）。
+CREATE TABLE cross_device_sessions (
+    xdev_pk            BIGINT IDENTITY(1,1) NOT NULL,
+    xdev_id            NVARCHAR(64)  NOT NULL,
+    tenant_id          BIGINT        NOT NULL,
+    challenge_pk       BIGINT        NOT NULL,
+    status             NVARCHAR(20)  NOT NULL,
+    verification_code  NVARCHAR(16)  NOT NULL,
+    desktop_ip         NVARCHAR(45)  NOT NULL,
+    phone_ip           NVARCHAR(45)  NULL,
+    proximity_mismatch BIT           NULL,
+    user_ref_id        BIGINT        NULL,
+    credential_pk      BIGINT        NULL,
+    issued_jti         NVARCHAR(64)  NULL,
+    expires_at         DATETIME2(3)  NOT NULL,
+    scanned_at         DATETIME2(3)  NULL,
+    confirmed_at       DATETIME2(3)  NULL,
+    consumed_at        DATETIME2(3)  NULL,
+    created_at         DATETIME2(3)  NOT NULL,
+    updated_at         DATETIME2(3)  NOT NULL,
+    CONSTRAINT PK_cross_device_sessions PRIMARY KEY (xdev_pk),
+    CONSTRAINT UQ_xdev_id UNIQUE (xdev_id),
+    CONSTRAINT UQ_xdev_challenge UNIQUE (challenge_pk),
+    CONSTRAINT FK_xdev_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id),
+    CONSTRAINT FK_xdev_challenge FOREIGN KEY (challenge_pk) REFERENCES auth_challenges(challenge_pk),
+    CONSTRAINT FK_xdev_userref FOREIGN KEY (user_ref_id) REFERENCES fido_user_ref(user_ref_id),
+    CONSTRAINT FK_xdev_cred FOREIGN KEY (credential_pk) REFERENCES fido_credentials(credential_pk),
+    CONSTRAINT CK_xdev_status CHECK (status IN ('PENDING','SCANNED','CONFIRMED','CONSUMED','DENIED','EXPIRED'))
 );

@@ -6,11 +6,13 @@
 - 對齊文件：`d:\fido\docs\api-contract.md`、`d:\fido\CLAUDE.md`
 - 讀者：dev-engineer（JPA/實體對應）、devops-engineer（建庫、索引、備份、清理排程）
 
-> 本文件是八張核心表的**權威 schema**。欄位命名與型別以此為準，dev / devops 請勿自行臆測。凡標記 **【本文件補充決策 DBn】** 者為 CLAUDE.md / API 合約未明確涵蓋、由本文件先行決定、待人工複核回填的細節，清單見文末附錄 B。
+> 本文件是九張核心表的**權威 schema**。欄位命名與型別以此為準，dev / devops 請勿自行臆測。凡標記 **【本文件補充決策 DBn】** 者為 CLAUDE.md / API 合約未明確涵蓋、由本文件先行決定、待人工複核回填的細節，清單見文末附錄 B。
 >
 > 第七張表 `tenant_app_bindings`（原生 App 情境的 Digital Asset Links 授權登錄）為 origin 綁定架構定案（`docs/origin-binding.md` OB1/OB3）後新增，早期六張表的敘述已一併更新為七張。
 >
 > 第八張表 `signing_keys`（session JWT 簽章金鑰持久化，DB18）為「多實例部署共享簽章金鑰」缺口拍板後新增（見 CLAUDE.md 決策表「Session JWT 簽章金鑰持久化」列）。此表為**平台級**（不隸屬任何租戶、無 `tenant_id`）。
+>
+> 第九張表 `cross_device_sessions`（DB19）為情境三（跨裝置 QR transaction confirmation）拍板後新增，是桌機 QR 登入 session 的狀態機/雙方 IP/確認碼載體，1:1 包住一列既有 `auth_challenges`。見第 11 節、`docs/api-contract.md` §3.4、`docs/decisions/qr-cross-device-login-design.md`。
 
 ---
 
@@ -26,9 +28,10 @@
 8. [`audit_log`](#8-audit_log)
 9. [`tenant_app_bindings`](#9-tenant_app_bindings)
 10. [`signing_keys`](#10-signing_keys)
-11. [索引與外鍵總表](#11-索引與外鍵總表)
-12. [資料保留與清理排程](#12-資料保留與清理排程)
-13. [附錄 B：本文件補充決策清單](#附錄-b本文件補充決策清單)
+11. [`cross_device_sessions`](#11-cross_device_sessions)
+12. [索引與外鍵總表](#12-索引與外鍵總表)
+13. [資料保留與清理排程](#13-資料保留與清理排程)
+14. [附錄 B：本文件補充決策清單](#附錄-b本文件補充決策清單)
 
 ---
 
@@ -55,7 +58,8 @@ tenants (1) ──< fido_user_ref (1) ──< fido_credentials (1) ──(1:1)�
    │                   │                      └──< (被 auth_challenges 於驗證時參照)
    ├──< auth_challenges (challenge 綁定租戶，登入前可能尚未綁定 user_ref)
    ├──< audit_log (所有事件，含 pre-auth 失敗，tenant/user 可為 NULL)
-   └──< tenant_app_bindings (原生 App 情境：租戶授權的 Android App 簽章指紋)
+   ├──< tenant_app_bindings (原生 App 情境：租戶授權的 Android App 簽章指紋)
+   └──< cross_device_sessions (情境三：跨裝置 QR 登入 session，1:1 包住一列 auth_challenges)
 ```
 
 - `tenants 1 : N fido_user_ref`：一個購物網站租戶下多個使用者參照。
@@ -65,6 +69,7 @@ tenants (1) ──< fido_user_ref (1) ──< fido_credentials (1) ──(1:1)�
 - `auth_challenges`：短生命週期，綁租戶；註冊時綁 `user_ref`，登入（usernameless）時 `user_ref_id` 可為 NULL，於驗證成功後由 credential 反查。
 - `audit_log`：獨立事件表，`tenant_id`/`user_ref_id` 允許 NULL（涵蓋 API Key 無效等 pre-auth 事件）。
 - `signing_keys`：**平台級、與租戶無關**的獨立表（不在上圖關係內、無外鍵），存 session JWT 簽章金鑰供所有實例共享。見第 10 節。
+- `cross_device_sessions`：情境三跨裝置 QR 登入 session，綁租戶，`1:1` 包住一列 `auth_challenges`（`challenge_pk` 外鍵），讓 assertion 密碼學驗證能重用既有以 ceremony 為入口的邏輯。短生命週期（120 秒 TTL）+ 狀態機。見第 11 節。
 
 ---
 
@@ -479,7 +484,77 @@ CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE sta
 
 ---
 
-## 11. 索引與外鍵總表
+## 11. `cross_device_sessions`
+
+情境三（跨裝置 QR transaction confirmation）的登入 session。一次「桌機發起、手機確認」的登入嘗試，以不透明高熵 `xdev_id` 識別，有自己的狀態機與 120 秒 TTL，`1:1` 包住一列既有 `auth_challenges`（讓 assertion 密碼學驗證重用既有以 ceremony 為入口的邏輯）。對應 `docs/api-contract.md` §3.4；完整設計見 `docs/decisions/qr-cross-device-login-design.md`。
+
+> **為何用新表而非塞進 `auth_challenges`（DB19）**：`auth_challenges` 是「一次性 challenge」的精簡表，只有 PENDING/CONSUMED/EXPIRED、無雙方 IP、無確認碼、TTL 慣例 60 秒。cross-device 需要多態狀態機（PENDING→SCANNED→CONFIRMED→CONSUMED，另有 DENIED/EXPIRED）、桌機/手機兩個 IP、確認碼、暫存簽發的 jti、120 秒 TTL。新表包住既有 challenge 列（1:1 外鍵），既隔離新概念、又讓密碼學驗證能重用既有程式碼路徑；硬塞進 `auth_challenges` 會污染同裝置流程語意。
+
+| 欄位 | 型別 | Null | 預設 | 說明 |
+|---|---|---|---|---|
+| `xdev_pk` | BIGINT IDENTITY | 否 | | 內部 PK |
+| `xdev_id` | NVARCHAR(64) | 否 | | 對外不透明 capability 識別（≥256-bit 亂數 base64url），唯一。QR 內唯一承載物、亦為手機呼叫端點 B/C 的 capability 憑證（見 api-contract §1.2.2 / D16） |
+| `tenant_id` | BIGINT | 否 | | FK → tenants |
+| `challenge_pk` | BIGINT | 否 | | FK → auth_challenges，1:1（唯一）。包住的既有 challenge 列（`ceremony_type='AUTHENTICATION'`、`user_ref_id=NULL` usernameless、`expires_at=now+120s`） |
+| `status` | NVARCHAR(20) | 否 | 'PENDING' | CHECK IN ('PENDING','SCANNED','CONFIRMED','CONSUMED','DENIED','EXPIRED')；單向狀態機 |
+| `verification_code` | NVARCHAR(16) | 否 | | 確認碼，桌機 QR 頁與手機確認畫面各顯示一份供比對（輔助防禦） |
+| `desktop_ip` | NVARCHAR(45) | 否 | | 端點 A 由購物網站後端轉來的桌機瀏覽器 client IP（proximity 基準，IPv4/IPv6） |
+| `phone_ip` | NVARCHAR(45) | 是 | | 手機直連來源 IP（claim/result 時寫入） |
+| `proximity_mismatch` | BIT | 是 | | **【DB19】** proximity 檢查結果（`desktop_ip` vs `phone_ip` 出口是否不一致）；result 時計算寫入。S2 為警示制：此值僅供稽核/查詢，**不影響登入是否成功**。權威稽核痕跡另寫 `audit_log.detail.proximityMismatch`（本表短生命週期會被清理，非長期稽核來源） |
+| `user_ref_id` | BIGINT | 是 | | FK → fido_user_ref；確認成功後由 credential 反查填入 |
+| `credential_pk` | BIGINT | 是 | | FK → fido_credentials；本次使用的憑證 |
+| `issued_jti` | NVARCHAR(64) | 是 | | 簽發 session JWT 的 jti（防重領/稽核） |
+| `expires_at` | DATETIME2(3) | 否 | | = created_at + 120 秒（S6，伺服器端權威時效） |
+| `scanned_at` | DATETIME2(3) | 是 | | 轉 SCANNED 時間 |
+| `confirmed_at` | DATETIME2(3) | 是 | | 轉 CONFIRMED 時間 |
+| `consumed_at` | DATETIME2(3) | 是 | | 桌機領取 JWT（轉 CONSUMED）時間 |
+| `created_at` | DATETIME2(3) | 否 | SYSUTCDATETIME() | |
+| `updated_at` | DATETIME2(3) | 否 | SYSUTCDATETIME() | |
+
+**鍵/索引**：PK `xdev_pk`；UNIQUE `xdev_id`；UNIQUE `challenge_pk`（1:1）；INDEX (`tenant_id`,`status`)；INDEX `expires_at`（清理用）。
+
+**時效/狀態落地**：TTL 120 秒（僅此 ceremony type，不動同裝置 60 秒，見 CLAUDE.md「Challenge 時效」）。狀態機單向：claim 只在 `PENDING` 成功（→SCANNED）、result 只在 `SCANNED` 成功（→CONFIRMED）、status 取 JWT 只在 `CONFIRMED` 成功且立即轉 `CONSUMED`（JWT 只能被領一次）。違反回 `409 XDEV_SESSION_INVALID_STATE`；逾期回 `400 XDEV_SESSION_EXPIRED`；查無 `xdev_id` 回 `404 XDEV_SESSION_NOT_FOUND`。
+
+**軟刪除不適用**：短生命週期一次性 session，非組態資料；到期/用畢由清理排程處理（見第 13 節），稽核事件另寫 `audit_log`。
+
+**API 對應**：端點 A（insert PENDING）、B（→SCANNED，回權威 rpId/challenge）、C（→CONFIRMED，重用 `AuthenticationService.verifyResult`+proximity 警示）、D（CONFIRMED 回 JWT 並→CONSUMED）。見 api-contract §3.4。
+
+```sql
+CREATE TABLE dbo.cross_device_sessions (
+    xdev_pk            BIGINT IDENTITY(1,1) NOT NULL,
+    xdev_id            NVARCHAR(64)  NOT NULL,
+    tenant_id          BIGINT        NOT NULL,
+    challenge_pk       BIGINT        NOT NULL,
+    status             NVARCHAR(20)  NOT NULL CONSTRAINT DF_xdev_status DEFAULT 'PENDING',
+    verification_code  NVARCHAR(16)  NOT NULL,
+    desktop_ip         NVARCHAR(45)  NOT NULL,
+    phone_ip           NVARCHAR(45)  NULL,
+    proximity_mismatch BIT           NULL,
+    user_ref_id        BIGINT        NULL,
+    credential_pk      BIGINT        NULL,
+    issued_jti         NVARCHAR(64)  NULL,
+    expires_at         DATETIME2(3)  NOT NULL,
+    scanned_at         DATETIME2(3)  NULL,
+    confirmed_at       DATETIME2(3)  NULL,
+    consumed_at        DATETIME2(3)  NULL,
+    created_at         DATETIME2(3)  NOT NULL CONSTRAINT DF_xdev_created DEFAULT SYSUTCDATETIME(),
+    updated_at         DATETIME2(3)  NOT NULL CONSTRAINT DF_xdev_updated DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_cross_device_sessions PRIMARY KEY (xdev_pk),
+    CONSTRAINT UQ_xdev_id UNIQUE (xdev_id),
+    CONSTRAINT UQ_xdev_challenge UNIQUE (challenge_pk),
+    CONSTRAINT FK_xdev_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+    CONSTRAINT FK_xdev_challenge FOREIGN KEY (challenge_pk) REFERENCES dbo.auth_challenges(challenge_pk),
+    CONSTRAINT FK_xdev_userref FOREIGN KEY (user_ref_id) REFERENCES dbo.fido_user_ref(user_ref_id),
+    CONSTRAINT FK_xdev_cred FOREIGN KEY (credential_pk) REFERENCES dbo.fido_credentials(credential_pk),
+    CONSTRAINT CK_xdev_status CHECK (status IN ('PENDING','SCANNED','CONFIRMED','CONSUMED','DENIED','EXPIRED'))
+);
+CREATE INDEX IX_xdev_tenant_status ON dbo.cross_device_sessions (tenant_id, status);
+CREATE INDEX IX_xdev_expires ON dbo.cross_device_sessions (expires_at);
+```
+
+---
+
+## 12. 索引與外鍵總表
 
 | 表 | PK | UNIQUE | 其他索引 | FK |
 |---|---|---|---|---|
@@ -491,15 +566,17 @@ CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE sta
 | audit_log | audit_id | — | (tenant_id,user_ref_id,created_at), created_at, (tenant_id,event_type,created_at) | tenant_id→tenants, user_ref_id→fido_user_ref |
 | tenant_app_bindings | app_binding_pk | binding_uid, (tenant_id,package_name,sha256_cert_fingerprint) | (tenant_id,status) | tenant_id→tenants |
 | signing_keys | key_pk | kid, **filtered** (status) WHERE status='ACTIVE' | — | —（平台級，無 FK） |
+| cross_device_sessions | xdev_pk | xdev_id, challenge_pk | (tenant_id,status), expires_at | tenant_id→tenants, challenge_pk→auth_challenges, user_ref_id→fido_user_ref, credential_pk→fido_credentials |
 
 ---
 
-## 12. 資料保留與清理排程
+## 13. 資料保留與清理排程
 
 - **【DB11】** `auth_challenges`：challenge 為一次性短生命週期。建議 SQL Agent Job 每分鐘將 `expires_at < now` 的 PENDING 標為 EXPIRED，並每日刪除 `created_at < now-1天` 的列（保留少量供近期除錯即可，非稽核來源）。
 - **【DB12】** `audit_log`：保留 1 年（對齊 CLAUDE.md）。建議按月做資料分割（partition by `created_at` 月份）或 SQL Agent Job 每日刪除 `created_at < now-365天`。若採 partition，可用 SWITCH + DROP 高效清理。
 - `tenant_app_bindings`：**組態性資料，無自動清理**。與 `tenants` 同生命週期，撤銷採軟刪除（`status='REVOKED'`）長期保留供稽核；僅隨租戶整體下線時一併人工處理。
 - `signing_keys`：**組態性資料，無自動清理排程**。正常只有一把 `ACTIVE`。手動輪替後產生的 `RETIRED` 列於約 2 分鐘（>JWT 120 秒效期）後即無 JWT 需其驗簽，運維可隨時手動 DELETE，非必要。
+- **【DB19】** `cross_device_sessions`：短生命週期一次性 session（120 秒 TTL），**非稽核來源**（稽核走 `audit_log`）。比照 `auth_challenges`（DB11）：建議 SQL Agent Job 每分鐘把 `expires_at < now` 仍為 `PENDING`/`SCANNED` 的列標 `EXPIRED`，每日刪除 `created_at < now-1天` 的列。其 1:1 綁定的 `auth_challenges` 列由既有 challenge 清理排程處理；`cross_device_sessions` 因對 `auth_challenges` 有外鍵，刪除順序須先刪 `cross_device_sessions` 再刪 `auth_challenges`（或以 `ON DELETE NO ACTION` 下的批次順序處理）。
 - TDE 全庫加密與定期備份由 devops-engineer 依 CLAUDE.md 設定，不在本 schema 文件內展開。
 
 ---
@@ -526,5 +603,6 @@ CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE sta
 | DB16 | `audit_log.device_pk` 不設硬 FK | 避免清理/軟刪動作被稽核列連動限制 |
 | DB17 | 新增第七張表 `tenant_app_bindings` 存租戶授權 App 簽章指紋（origin-binding.md OB3 選項 B，已拍板；未採選項 A 的 `tenants` JSON 欄位） | 可逐筆稽核/輪替 App 授權、支援一租戶多 App、指紋建唯一索引防重複；已回填 CLAUDE.md 六張→七張 |
 | DB18 | 新增第八張表 `signing_keys` 持久化 session JWT 簽章金鑰（私鑰 PKCS#8、公鑰 X.509 直存 VARBINARY，TDE 保護，不加應用層封裝）；filtered unique index 保證至多一把 ACTIVE 並兼作多實例首啟競態防護 | 解決記憶體金鑰重啟即換、多實例 JWKS 不一致的部署缺口；DB 天然支援多實例共享、沿用既有 TDE，優於檔案+部署層同步方案。已回填 CLAUDE.md 七張→八張 |
+| DB19 | 新增第九張表 `cross_device_sessions`（情境三跨裝置 QR 登入 session：狀態機、雙方 IP、確認碼、120 秒 TTL、1:1 包住一列 `auth_challenges`）；含 `proximity_mismatch` BIT 便於查詢（S2 警示制，不影響登入成敗，權威稽核仍走 `audit_log.detail`）。非稽核來源、短生命週期清理比照 `auth_challenges` | 情境三（S4，擁有者已拍板）；用新表隔離狀態機/雙方 IP/確認碼、避免污染同裝置 `auth_challenges` 語意，同時 1:1 外鍵讓 assertion 密碼學驗證重用既有 ceremony 入口。已回填 CLAUDE.md 八張→九張 |
 
 > 待複核項：DB2（API Key 雜湊儲存）、DB14（1:1 憑證裝置關係）、DB15（單 schema 邏輯隔離）屬會影響實作與運維的取捨，建議優先確認。DB17 已由人類拍板（OB3 選項 B）。複核通過後交接 dev-engineer（JPA 實體，含新 `tenant_app_bindings` 實體）與 devops-engineer（建庫腳本、索引、清理 Job、TDE/備份，並重新在 LocalDB 驗證含第七張表的 schema 建置）。

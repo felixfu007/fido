@@ -1,7 +1,13 @@
 # FIDO/FIDO2 認證系統 — 專案共識
 
 四個系統：FIDO 驗證伺服器、FIDO 驗證 APP（Android）、採用 FIDO 登入的購物網站、資料主機（SQL Server）。
-後端：Spring Boot + Maven。架構情境：**A（標準 WebAuthn，同裝置）**，情境 B（跨裝置推播）已放棄。情境 A 的使用者存取涵蓋「手機瀏覽器存取購物網站」與「購物網站原生 Android App 內直呼 Credential Manager」兩種前端情境（後者對每個租戶 opt-in，見「WebAuthn origin 綁定 / 存取情境」決策與 `docs/origin-binding.md`）。
+後端：Spring Boot + Maven。架構情境：**A（標準 WebAuthn，同裝置）**為主，另有已拍板的**情境三（跨裝置 QR transaction confirmation）**；情境 B（跨裝置推播）已放棄。情境 A 的使用者存取涵蓋「手機瀏覽器存取購物網站」與「購物網站原生 Android App 內直呼 Credential Manager」兩種前端情境（後者對每個租戶 opt-in，見「WebAuthn origin 綁定 / 存取情境」決策與 `docs/origin-binding.md`）。
+
+**三個情境的區隔（沿用 `docs/decisions/qr-cross-device-login-design.md` 8.1）：**
+
+- **情境 A（同裝置）**：發起與生物辨識簽章在同一台裝置（手機）；origin 由 OS/瀏覽器或原生 App 呼叫方擔保，走 Credential Manager。v1 主線。
+- **情境三（跨裝置 QR transaction confirmation）**：桌機瀏覽器發起、顯示 QR，手機 App 掃碼後作**漫遊確認器**，用**手機上既有、已通過 TEE/StrongBox 註冊的憑證**做一次**真正的 WebAuthn assertion**（非裸旗標）送回伺服器；桌機輪詢取得結果。是 **pull-based QR + 真 WebAuthn assertion**，**不使用** WebAuthn hybrid/caBLE。安全模型與範圍限制見下方決策表「跨裝置 QR 登入」數列與 `docs/decisions/qr-cross-device-login-design.md`（設計）、`docs/api-contract.md` §3.4（端點）。
+- **情境 B（跨裝置推播）**：自訂推播/帶外 boolean 核准，**已放棄**。與情境三的關鍵差異：情境三手機端做的是**密碼學真簽章**、伺服器驗簽不信任 boolean；情境 B 是裸核准，故安全性本質不同。
 
 ## 已確認的關鍵架構決策
 
@@ -10,7 +16,7 @@
 | FIDO 伺服器定位 | 多租戶平台，僅作後端驗證服務（非身分來源） |
 | RP ID | 購物網站網域 |
 | 身分權威來源 | 購物網站既有帳密系統；FIDO 為加掛選項，帳密永久保留（不可單獨用 FIDO 登入取代帳密救援） |
-| FIDO 驗證 APP 角色 | 自訂 Android `CredentialProviderService`，掛載於系統 Credential Manager（非獨立 APP 跳轉、非推播） |
+| FIDO 驗證 APP 角色 | 自訂 Android `CredentialProviderService`，掛載於系統 Credential Manager（非獨立 APP 跳轉、非推播）。**cross-device carve-out（情境三）**：另有一個由 deep link（已驗證 App Link）喚起的 `CrossDeviceLoginActivity`，供桌機 QR 掃碼登入使用。此為 `非獨立 APP 跳轉` 決策的明確 carve-out——該決策原意管的是**同裝置正常 ceremony 不得改走獨立 App**，而 cross-device 情境手機端根本沒有瀏覽器頁面/原生 App 在呼叫 Credential Manager（發起方在另一台桌機），Credential Manager 隱式喚起模型物理上不適用，deep link 是唯一可行喚起方式。**硬性範圍邊界**（比照 `SetupStatusActivity`）：此 Activity 只能經有效的、伺服器發出的 `xdevId` deep link 進入；只做「claim→確認→簽 assertion→submit」單一 ceremony；**嚴禁**新增裝置列表/撤銷/註冊等任何管理或並行認證 UI（那會違反 `非獨立 APP 跳轉` 原意）。同裝置流程不受影響、註冊仍只走 Credential Manager。詳見 `docs/decisions/qr-cross-device-login-design.md` 8.2 |
 | FIDO 驗證 APP 啟動器畫面 | `prod` flavor 保留**一個**最小化「設定/狀態」啟動器 Activity（Option B）。範圍嚴格限定：顯示 provider 是否已在系統啟用、一顆深連結進入系統 credential-provider 設定的按鈕、版本/客服/隱私（個資法）文字。**嚴禁**在此畫面內做任何登入/註冊 ceremony 或裝置列表/撤銷 UI——那會使其退化為 `非獨立 APP 跳轉` 決策所禁止的並行認證/管理路徑。ceremony 一律仍走 Credential Manager（由系統以 PendingIntent 隱式啟動 `CreatePasskeyActivity`/`GetPasskeyActivity`）。詳見下方「啟動器畫面決策」 |
 | 支援裝置 | 僅 Android 14+；不支援舊版 Android，第一版不支援 iOS |
 | 金鑰保護 | 強制要求 TEE/StrongBox 硬體安全區，不通過則拒絕註冊；驗證 Android Key Attestation 憑證鏈 |
@@ -29,8 +35,10 @@
 | 防帳號列舉策略 | 登入與裝置管理 API 一律採 200 + 空清單 / 冪等 no-op，不用 404 洩漏使用者或裝置是否存在 |
 | 傳輸安全 | TLS + API Key |
 | WebAuthn origin 綁定 / 存取情境 | v1 provider 一併支援「瀏覽器存取」與「購物網站原生 App 直呼 Credential Manager」兩情境；原生 App 情境對每個租戶採 **opt-in**（租戶須完成 `assetlinks.json` Digital Asset Links onboarding + 平台登錄 App 簽章指紋至 `tenant_app_bindings`）。origin 由 provider 從呼叫方動態、經驗證取得（不寫死），伺服器以 `expected_origin`(web) ∪ `tenant_app_bindings`(app) 允許清單把關，不符回 `403 ORIGIN_NOT_ALLOWED`。詳見 `docs/origin-binding.md` |
-| Challenge 時效 | 60 秒，逾時前端自動重新申請 |
-| 資料庫 | 獨立 SQL Server 實例（與其他系統分開）；八張核心表：`tenants`, `fido_user_ref`, `fido_credentials`, `bound_devices`, `auth_challenges`, `audit_log`, `tenant_app_bindings`, `signing_keys`（第七張為原生 App 情境的 Digital Asset Links 授權登錄，見 `docs/origin-binding.md`；第八張為 session JWT 簽章金鑰持久化，見 `docs/db-schema.md` 第 10 節 / DB18） |
+| Challenge 時效 | 60 秒（同裝置情境 A），逾時前端自動重新申請。**cross-device 情境三例外**：該 ceremony type 的 challenge/xdev session TTL 放寬為 **120 秒**（多了拿手機→掃碼→看確認畫面→指紋數個人為步驟，60 秒偏緊），僅此 ceremony type 偏離、**不動同裝置 60 秒**，兩者並存不互相取代。 |
+| 跨裝置 QR 登入 — 使用範圍限制（S7） | **限縮範圍**：QR 跨裝置登入只能用在一般瀏覽/購物等**低風險**情境；敏感動作（改密碼、金流、裝置撤銷/管理）**仍強制要求同裝置驗證**，不接受以 QR 登入取得的 session 去執行這些操作。落地機制：cross-device 簽發的 session JWT 於 `amr` claim 多帶 `"xdev"` 值（見下方「目前階段」cross-device 段落與 `docs/api-contract.md` §1.3），下游（購物網站後端）偵測到 `amr` 含 `"xdev"` 時，對敏感操作須要求 step-up（同裝置重新驗證），不可直接放行。 |
+| 跨裝置 QR 登入 — proximity 政策（S2） | **預設只警示、不阻擋**：手機與桌機出口 IP 不一致時**不擋登入**，僅於 `audit_log`（`detail.proximityMismatch=true`）與確認/回應中標記異常，供稽核與客服排查。（與設計文件原建議的 strict 不同，擁有者拍板採警示制。）殘餘風險已由擁有者簽核（S1，風險責任轉由使用者承擔），並以 S7 範圍限縮為主要補償控制。 |
+| 資料庫 | 獨立 SQL Server 實例（與其他系統分開）；九張核心表：`tenants`, `fido_user_ref`, `fido_credentials`, `bound_devices`, `auth_challenges`, `audit_log`, `tenant_app_bindings`, `signing_keys`, `cross_device_sessions`（第七張為原生 App 情境的 Digital Asset Links 授權登錄，見 `docs/origin-binding.md`；第八張為 session JWT 簽章金鑰持久化，見 `docs/db-schema.md` 第 10 節 / DB18；第九張為情境三跨裝置 QR 登入 session 的狀態機/雙方 IP/確認碼載體，見 `docs/db-schema.md` 第 11 節） |
 | 加密/備份 | TDE 全庫加密 + 標準定期備份 |
 | 容量目標 | 中小規模：數萬會員，峰值 ≤100 TPS |
 | 部署 | 全地端部署（非雲端） |
@@ -115,9 +123,39 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
 
 `docs/vendor/technical-limitations.md`（#12）、`docs/vendor/maintenance-guide.md`（§4）、`docs/vendor/environment-setup-guide.md`（第 6 節）、`docs/vendor/api-integration-guide.md`（第 7.2 節）的「未解決／人工 SQL INSERT」用詞已同步改為反映 admin CLI 已實作的現況。
 
+### 桌機 QR 掃碼跨裝置登入（情境三）決策定案
+
+先前列為「先設計、後實作」的桌機瀏覽器 QR 掃碼跨裝置登入，設計方案見 `docs/decisions/qr-cross-device-login-design.md`（systems-analyst，比照金鑰持久化/租戶開通 CLI 的節奏，先出設計文件、集中列出需擁有者拍板的 S1–S7）。**擁有者已於本次全數拍板**，結論：
+
+- **S1（殘餘風險）＝接受**：擁有者明示「風險責任轉給使用者自行承擔」。cross-device QR 登入本質上比同裝置 WebAuthn 防釣魚弱一級（密碼學綁定擋不住即時人為中繼），此為 QR + 網路回報、無 BLE 近距路線的固有上限。
+- **S2（proximity 政策）＝預設只警示、不阻擋**（與設計文件原建議的 strict 不同）：手機與桌機出口 IP 不一致時不擋登入，僅於 `audit_log` 與回應標記異常。**因此設計文件 5.2.3 原把 proximity 列為「主力防禦」的前提改變**——warn-only 下 proximity 退為偵測/稽核，防釣魚的主要補償控制改由 S7 範圍限縮承擔（見下方「需再確認事項」）。
+- **S3、S4、S5、S6＝採納設計文件原建議**：新增情境三並對「非獨立 APP 跳轉」加 carve-out（S3）；新增第九張核心表 `cross_device_sessions`（S4）；新增「手機 App 直連 fido-server、以 `xdevId` capability 認證、不帶 X-API-Key」的呼叫方類別（S5）；cross-device ceremony 的 challenge/session TTL 放寬為 120 秒（S6，僅此 ceremony type、不動同裝置 60 秒）。
+- **S7（使用範圍）＝採納限縮範圍**：QR 跨裝置登入只能用於低風險情境；敏感動作（改密碼、金流、裝置撤銷/管理）仍強制同裝置驗證。
+
+**本次新補的落地機制（`amr` cross-device 標記，systems-analyst 這次任務新增、非設計文件原有）**：S7 需要一個技術機制讓下游能分辨「這個 session JWT 是不是走 cross-device QR 這條較弱路徑簽出來的」。決定沿用 `JwtService.issue(...)` 既有的 `amr`（Authentication Method Reference）claim：同裝置流程維持 `["fido","hwk"]`，**cross-device 流程改簽 `["fido","hwk","xdev"]`**（多帶 `"xdev"` 值，語意上仍是 FIDO + 硬體金鑰的真簽章，只是額外經 cross-device 通道）。下游（`shopping-site-reference` 或未來採用廠商後端）在自己的授權邏輯裡偵測 `amr` 含 `"xdev"` 時，對敏感操作要求 step-up（同裝置重新驗證），不可直接放行。**注意 fido-server 本身無法強制 S7**（它非身分來源、看不到下游「哪個動作算敏感」），故此機制本質是「伺服器誠實標記登入路徑強度、下游據以授權」，enforcement 落在下游——這與既有「終端使用者身分/授權把關由呼叫端負責」(D15) 的責任邊界一致。已寫入 `docs/api-contract.md` §1.3（JWT claims）與 §3.4（端點），及採用廠商文件 `docs/vendor/api-integration-guide.md`（step-up 提醒）。
+
+**已回填的文件（本次 systems-analyst 執行，純文件、未寫 production code、未 commit）**：本 `CLAUDE.md`（情境三敘述、決策表四列、APP 角色 carve-out、本段）；`docs/api-contract.md`（§3.4 四端點 A–D、§1.2 手機 capability 呼叫方類別、`XDEV_*` 錯誤碼、proximity 改警示欄位而非拒絕碼、§1.3 `amr` `xdev`、`originType` 擴充 `CROSS_DEVICE_QR`）；`docs/db-schema.md`（第 11 節 `cross_device_sessions`、核心表八→九張）；`docs/origin-binding.md`（OB7 cross-device origin 信任模型）；採用廠商四份文件（`technical-limitations.md` 第 2 項改寫、`api-integration-guide.md` 新增 §11、`usage-scenarios-guide.md` 新增情境九、`maintenance-guide.md` 新增 §11）。
+
+**S1+S2(warn-only) 實際風險敞口已向擁有者澄清並二次確認（已結案，非開放問題）**：systems-analyst 主動指出，設計文件 S1 描述的殘餘風險窄帶（「同一網路出口的即時中繼 + 使用者對正確服務名仍確認」）其實是**在 proximity 為 strict 的前提下**才成立——strict 能攔下「攻擊者與受害者出口 IP 不同」的遠端中繼，殘餘只剩同出口。擁有者同時選了 **S2＝warn-only**，等於**放行了原本 strict 會攔下的遠端（不同出口 IP）即時中繼**，只留稽核痕跡；也就是 S1+S2(warn-only) 的實際殘餘風險**比 S1 條文字面描述更寬**：任意網路位置的即時人為中繼都不再被阻擋，全靠 (a) 手機確認畫面上使用者的警覺、(b) S7 範圍限縮把 QR session 能造成的損害限制在低風險動作。此落差已明確呈報擁有者，**擁有者在完整知悉此一更寬風險敞口後，再次明確確認「使用者自行承擔風險」，維持 S2＝warn-only 不變**。`docs/vendor/maintenance-guide.md` §11 已註記「未來若某租戶想要更強防護，可擴充為每租戶可設定 strict」為後續可擴充項（本次不實作該設定機制）。
+
+**交接**：devops-engineer（`infra/sql/` 新增 `cross_device_sessions` 建表/索引/清理 Job、LocalDB 重驗含第九張表）；dev-engineer（fido-server 端點 A–D + JPA 實體 + 重用 `verifyResult` + 狀態機 + proximity 警示、`amr` 加 `xdev`；shopping-site start/poll 代理 + JWT 收尾 + `amr` step-up 授權示範；`CrossDeviceLoginActivity` + App HTTPS client）；qa-engineer（proximity 警示情境、`amr` 含 `xdev` 時敏感操作被要求 step-up 的授權情境、狀態機一次性/重放負向測試、跨行程 E2E）。
+
+**（後續更新，2026-07-24）三個並行實作任務完成後浮現的兩個缺口，systems-analyst 已處理：**
+
+- **缺口一（DENIED 無觸發端點）＝拍板新增端點 E（`docs/api-contract.md` §3.4.E / D18）。** 兩個獨立 dev-engineer 任務都誠實回報：原 §3.4 A–D 四端點沒有任何路徑能把 session 轉成 `DENIED`（fido-server 的 `CrossDeviceSessionStatus` 有此 enum 值、狀態機支援，但無 API 進入點；Android `CrossDeviceLoginActivity` 的「取消」與「本裝置無憑證」分支目前不呼叫伺服器、只結束畫面讓 session 自然逾時成 `EXPIRED`）。**決策＝新增第五個端點 `POST .../sessions/{xdevId}/deny`**（手機直連、`xdevId` capability，把 `PENDING`/`SCANNED`→`DENIED`＋寫 `audit_log XDEV_DENIED`）。理由：(1) `DENIED`（使用者看過確認畫面主動拒絕，尤其「不是我」）與 `EXPIRED`（被動逾時，資訊量低）語意不同，混為一談會流失訊號；(2) 在 S2 warn-only、遠端即時中繼不再被 proximity 阻擋的風險態勢下，使用者於確認畫面上的警覺是少數補償控制之一，`DENIED`+audit 正是讓「使用者主動識破並拒絕」被營運方觀察到的唯一途徑，對偵測釣魚/中繼有實質價值；(3) 這**不是新架構決策**——設計文件 §5.2.3 第 3 點已把確認畫面「不是我」明確拒絕出口（`DENIED`+audit）列為【必要】的四層防禦之一、屬 S1/S2 簽核範圍，且 §3.4.D 桌機輪詢的 `DENIED` 回應路徑本已定義（端點 D 無需改動），端點 E 只是補上被半定義的合約缺口。已回填 `docs/api-contract.md`（§3.4 端點表 A→E、§3.4.E 子節、§1.2.2/D16 手機直連端點由 B/C 增為 B/C/E、§6 對應總表、附錄 D18）。**後續小任務**：dev-engineer 補 fido-server 端點 E handler（`CrossDeviceLoginController` + service，複用既有 `xdevId` capability 解析）與 Android `CrossDeviceLoginActivity` 的取消/無憑證分支改呼叫此端點；`shopping-site-reference` 無需改動（poll 端點 D 的 DENIED 處理本已依合約實作）。
+
+- **缺口二（端點 C→D 之間 session JWT 以單機記憶體 `Map<xdevId,IssuedToken>` 暫存）＝記錄為已知限制，並標示一個待擁有者確認的部署前提（見下）。** fido-server 實作者發現此暫存若在 fido-server 多實例、且端點 C 與端點 D 被路由到不同節點時，輪詢會拿不到 JWT（回 409、使用者體驗像卡住）；其類比既有 `RateLimitService` 亦為單機限制、先例已被接受，故本次比照不處理。systems-analyst 判斷：**v1 記錄此限制即可**（與現有單機元件的接受先例一致，且本專案為地端、中小規模，v1 若以單一 fido-server 實例部署則此限制永不發生）。**但須誠實點出與 `RateLimitService` 的失效模式差異**：`RateLimitService` 多實例下是「軟性過度放行」（各實例各自算 100 TPS、總量可能超標，但功能不壞）；此 JWT 暫存多實例下是「功能性中斷」（輪詢真的拿不到結果），嚴重度較高。因此附帶一個**待擁有者確認的部署前提，非 systems-analyst 可自行拍板的架構方向**：⚑ **`fido-server` v1 是否確定以單一實例部署？** 若「是」→ 此限制永不發生，記錄即可；若未來要多實例 → 須先解決（最乾淨作法：把短效 JWT 直接存進 `cross_device_sessions`——該表已有 `issued_jti` 欄、屬 TDE 加密庫、JWT 為 120 秒一次性，落庫風險低；或改共享快取 / sticky routing）。systems-analyst **不自行選定**「維持記憶體」或「改落庫」的方向，交擁有者定奪。
+
 ## 待辦事項
 
-目前無開放待辦事項。上述兩項缺口（Session JWT 簽章金鑰持久化、正式租戶開通 CLI）已完成實作並經 qa-engineer 獨立驗證通過，相關採用廠商文件用詞已同步更新。
+**桌機 QR 掃碼跨裝置登入（情境三）已拍板，待實作**（設計與決策見上方「桌機 QR 掃碼跨裝置登入（情境三）決策定案」段落）：
+
+- **devops-engineer**：`infra/sql/` 新增第九張表 `cross_device_sessions` 的建表/索引/清理 Agent Job（比照 `auth_challenges` 過期標記+每日清理）；在 LocalDB 重新驗證含第九張表的完整 schema 建置；同步更新 H2 測試 schema。
+- **dev-engineer**：fido-server 五個新端點（`docs/api-contract.md` §3.4 A–E，端點 E `.../deny` 為缺口一新增，見上方「後續更新」段落）+ `cross_device_sessions` JPA 實體 + 狀態機（PENDING→SCANNED→CONFIRMED→CONSUMED / DENIED / EXPIRED）+ proximity 警示（**只警示不擋、寫 `audit_log.detail.proximityMismatch`**）+ assertion 驗證重用 `AuthenticationService.verifyResult` + `JwtService` cross-device 路徑 `amr` 加 `"xdev"`；`shopping-site-reference` start/poll 代理 + 重用 JWT 收尾 + **示範偵測 `amr` 含 `xdev` 時對敏感操作要求 step-up 的授權邏輯**；`android-credential-provider` 新增 `CrossDeviceLoginActivity`（deep link 喚起、App 直連 fido-server、重用既有 assertion 簽章邏輯，取消/無憑證分支呼叫端點 E，嚴守 carve-out 範圍邊界）。
+  - **注意（實作進度）**：A–D、shopping-site 代理、`CrossDeviceLoginActivity` 主流程已由三個並行任務完成並各自測試通過（82/60/53）；上述本行保留為完整需求索引。**尚未完成、需後續小任務銜接的是端點 E**：fido-server 加 `.../deny` handler（`CrossDeviceLoginController` + service，複用 `xdevId` capability 解析與狀態機轉移）、Android 取消/無憑證分支改呼叫端點 E。`shopping-site-reference` 無需改動。
+- **qa-engineer**：新增 proximity 不符「警示但放行」情境、`amr` 含 `xdev` 時敏感操作被要求 step-up 的授權情境、狀態機一次性/重放/跨 session 混淆負向測試、跨行程 E2E（比照 `CrossProcessE2EManualRunner`）。
+
+上述兩項缺口（Session JWT 簽章金鑰持久化、正式租戶開通 CLI）已完成實作並經 qa-engineer 獨立驗證通過，相關採用廠商文件用詞已同步更新。
 
 先前列出的三項（`shopping-site-reference/` CSRF 防護、session cookie
 `secure` 預設值、`android-credential-provider/` 啟動器畫面 Option B 實作）皆已完成，過程與結果

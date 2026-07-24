@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    CrossDeviceLoginActivity 的畫面(情境三跨裝置 QR 登入,見該 Activity 檔頭完整說明與
+    CLAUDE.md「非獨立 APP 跳轉」決策的 carve-out 硬性範圍邊界)。比照 activity_setup_status.xml
+    的 ScrollView+LinearLayout 寫法,延續本專案「不用 Compose、findViewById 手動接元件」的既有慣例。
+
+    嚴禁在此新增任何裝置列表/撤銷/註冊等管理或並行認證 UI——本畫面只做單一 ceremony
+    「claim → (可能的多憑證選擇) → 確認/取消 → 簽 assertion → submit」,見該 Activity 檔頭
+    硬性範圍邊界。
+
+    以下四個群組依目前 CrossDeviceLoginFlow.UiState 顯示/隱藏,由 Activity 的 render() 控制:
+      - crossDeviceStatusText:一般狀態/進度/結果訊息(所有狀態皆可能使用)
+      - credentialSelectionGroup:本機有多筆該 rpId 憑證時的選擇清單
+      - confirmationGroup:Transaction Confirmation 確認畫面(單一憑證或已選定憑證後)
+      - crossDeviceWarningText:proximity 警示等額外提醒文字(僅特定狀態顯示)
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/cross_device_login_activity_label"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:id="@+id/crossDeviceStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/crossDeviceWarningText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="#B00020"
+            android:visibility="gone"
+            android:text="" />
+
+        <!-- 多筆本機憑證待選擇(CrossDeviceLoginFlow.UiState.SelectingCredential)。 -->
+        <LinearLayout
+            android:id="@+id/credentialSelectionGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="12dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/credentialButtonsContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
+        </LinearLayout>
+
+        <!-- Transaction Confirmation 確認畫面(CrossDeviceLoginFlow.UiState.AwaitingConfirmation)。
+             範圍嚴格限定於設計文件 4.2 步驟 4 列出的四行文字與確認/取消兩顆按鈕,不得擴充成
+             任何裝置管理/登入設定 UI。 -->
+        <LinearLayout
+            android:id="@+id/confirmationGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/crossDeviceTenantText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="" />
+
+            <TextView
+                android:id="@+id/crossDeviceCodeText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textStyle="bold"
+                android:text="" />
+
+            <Button
+                android:id="@+id/crossDeviceConfirmButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/cross_device_confirm_button" />
+
+            <Button
+                android:id="@+id/crossDeviceCancelButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/cross_device_cancel_button" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>

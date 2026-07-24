@@ -24,8 +24,19 @@ public class ShopSessionService {
     private final ConcurrentMap<String, ShopSession> sessions = new ConcurrentHashMap<>();
 
     public ShopSession createSession(String externalUserId, String fidoDeviceId, String fidoCredentialId) {
+        return createSession(externalUserId, fidoDeviceId, fidoCredentialId, false);
+    }
+
+    /**
+     * @param crossDeviceLogin 是否經由跨裝置 QR 登入（情境三）取得，見
+     *                         {@link ShopSession} Javadoc 與
+     *                         {@link com.shop.reference.authentication.ShopLoginFinalizer}。
+     */
+    public ShopSession createSession(String externalUserId, String fidoDeviceId, String fidoCredentialId,
+                                      boolean crossDeviceLogin) {
         String sessionId = "shopsess_" + UUID.randomUUID();
-        ShopSession session = new ShopSession(sessionId, externalUserId, fidoDeviceId, fidoCredentialId, Instant.now());
+        ShopSession session = new ShopSession(sessionId, externalUserId, fidoDeviceId, fidoCredentialId,
+                crossDeviceLogin, Instant.now());
         sessions.put(sessionId, session);
         return session;
     }

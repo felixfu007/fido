@@ -1,8 +1,12 @@
 package com.shop.reference.fidoclient;
 
 import com.shop.reference.config.FidoClientProperties;
+import com.shop.reference.fidoclient.dto.CrossDeviceStartRequest;
+import com.shop.reference.fidoclient.dto.CrossDeviceStartResponse;
+import com.shop.reference.fidoclient.dto.CrossDeviceStatusResponse;
 import com.shop.reference.fidoclient.dto.RegistrationOptionsRequest;
 import com.shop.reference.fidoclient.dto.RegistrationOptionsResponse;
+import org.springframework.test.web.client.match.MockRestRequestMatchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.autoconfigure.web.client.RestClientTest;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -110,6 +114,101 @@ class FidoServerClientTest {
                     assertThat(apiEx.getErrorCode()).isEqualTo("TENANT_DISABLED");
                     assertThat(apiEx.getTraceId()).isEqualTo("req-abc-123");
                     assertThat(apiEx.getStatus().value()).isEqualTo(403);
+                });
+    }
+
+    /** 對應 docs/api-contract.md §3.4.A：情境三跨裝置 QR 登入建立 session。 */
+    @Test
+    void crossDeviceStart_sendsApiKeyHeaderAndParsesResponse() {
+        String responseJson = """
+                {
+                  "xdevId": "xdev-secret-abc",
+                  "qrUrl": "https://fido-app-link.example/x/xdev-secret-abc",
+                  "verificationCode": "38-421",
+                  "expiresIn": 120
+                }
+                """;
+
+        mockServer.expect(requestTo("http://fido-server.test/api/v1/authentication/cross-device/sessions"))
+                .andExpect(method(org.springframework.http.HttpMethod.POST))
+                .andExpect(header("X-API-Key", "test-api-key"))
+                .andRespond(withSuccess(responseJson, MediaType.APPLICATION_JSON));
+
+        CrossDeviceStartResponse response = fidoServerClient.crossDeviceStart(new CrossDeviceStartRequest("203.0.113.9"));
+
+        assertThat(response.xdevId()).isEqualTo("xdev-secret-abc");
+        assertThat(response.qrUrl()).isEqualTo("https://fido-app-link.example/x/xdev-secret-abc");
+        assertThat(response.verificationCode()).isEqualTo("38-421");
+        assertThat(response.expiresIn()).isEqualTo(120);
+    }
+
+    /** 對應 docs/api-contract.md §3.4.D：PENDING/SCANNED 狀態時 session/warnings 皆缺席也要能正確解析。 */
+    @Test
+    void crossDeviceStatus_pending_parsesWithoutSessionOrWarnings() {
+        String responseJson = """
+                { "status": "PENDING" }
+                """;
+
+        mockServer.expect(requestTo(org.hamcrest.Matchers.startsWith(
+                        "http://fido-server.test/api/v1/authentication/cross-device/sessions/xdev-1/status")))
+                .andExpect(method(org.springframework.http.HttpMethod.GET))
+                .andExpect(header("X-API-Key", "test-api-key"))
+                .andExpect(MockRestRequestMatchers.queryParam("desktopClientIp", "203.0.113.9"))
+                .andRespond(withSuccess(responseJson, MediaType.APPLICATION_JSON));
+
+        CrossDeviceStatusResponse response = fidoServerClient.crossDeviceStatus("xdev-1", "203.0.113.9");
+
+        assertThat(response.status()).isEqualTo("PENDING");
+        assertThat(response.session()).isNull();
+        assertThat(response.warnings()).isNull();
+    }
+
+    /** 對應 docs/api-contract.md §3.4.D：CONFIRMED 狀態時帶 session JWT 與 proximity 警示。 */
+    @Test
+    void crossDeviceStatus_confirmed_parsesSessionAndWarnings() {
+        String responseJson = """
+                {
+                  "status": "CONFIRMED",
+                  "session": { "token": "header.payload.signature", "tokenType": "Bearer", "expiresIn": 120 },
+                  "warnings": { "proximityMismatch": true }
+                }
+                """;
+
+        mockServer.expect(requestTo(org.hamcrest.Matchers.startsWith(
+                        "http://fido-server.test/api/v1/authentication/cross-device/sessions/xdev-2/status")))
+                .andRespond(withSuccess(responseJson, MediaType.APPLICATION_JSON));
+
+        CrossDeviceStatusResponse response = fidoServerClient.crossDeviceStatus("xdev-2", "203.0.113.9");
+
+        assertThat(response.status()).isEqualTo("CONFIRMED");
+        assertThat(response.session().token()).isEqualTo("header.payload.signature");
+        assertThat(response.warnings().proximityMismatch()).isTrue();
+    }
+
+    @Test
+    void crossDeviceStart_mapsFidoServerErrorFormatToApiException() {
+        String errorJson = """
+                {
+                  "error": {
+                    "code": "TENANT_DISABLED",
+                    "message": "This tenant has been disabled.",
+                    "traceId": "req-xdev-1",
+                    "details": {}
+                  }
+                }
+                """;
+
+        mockServer.expect(requestTo("http://fido-server.test/api/v1/authentication/cross-device/sessions"))
+                .andRespond(withStatus(org.springframework.http.HttpStatus.FORBIDDEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(errorJson));
+
+        assertThatThrownBy(() -> fidoServerClient.crossDeviceStart(new CrossDeviceStartRequest("203.0.113.9")))
+                .isInstanceOf(FidoServerApiException.class)
+                .satisfies(ex -> {
+                    FidoServerApiException apiEx = (FidoServerApiException) ex;
+                    assertThat(apiEx.getErrorCode()).isEqualTo("TENANT_DISABLED");
+                    assertThat(apiEx.getTraceId()).isEqualTo("req-xdev-1");
                 });
     }
 

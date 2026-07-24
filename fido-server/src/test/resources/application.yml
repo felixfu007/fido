@@ -52,6 +52,9 @@ fido:
     rp-id: "shop.example.com"
     expected-origin: "https://shop.example.com"
     api-key: "dev-api-key-00000000000000000000"
+  cross-device:
+    ttl-seconds: 120
+    app-link-host: "fido-app.test.internal"
 
 logging:
   level:

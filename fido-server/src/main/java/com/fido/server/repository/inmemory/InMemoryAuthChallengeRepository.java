@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class InMemoryAuthChallengeRepository implements AuthChallengeRepository {
 
     private final Map<String, AuthChallenge> byCeremonyId = new ConcurrentHashMap<>();
+    private final Map<Long, AuthChallenge> byChallengePk = new ConcurrentHashMap<>();
     private final AtomicLong idSeq = new AtomicLong(1);
 
     @Override
@@ -24,11 +25,17 @@ public class InMemoryAuthChallengeRepository implements AuthChallengeRepository 
     }
 
     @Override
+    public Optional<AuthChallenge> findByChallengePk(Long challengePk) {
+        return Optional.ofNullable(byChallengePk.get(challengePk));
+    }
+
+    @Override
     public synchronized AuthChallenge save(AuthChallenge challenge) {
         if (challenge.getChallengePk() == null) {
             challenge.setChallengePk(idSeq.getAndIncrement());
         }
         byCeremonyId.put(challenge.getCeremonyId(), challenge);
+        byChallengePk.put(challenge.getChallengePk(), challenge);
         return challenge;
     }
 }

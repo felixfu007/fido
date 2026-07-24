@@ -33,6 +33,16 @@ public class ChallengeService {
     }
 
     public AuthChallenge create(Tenant tenant, Long userRefId, CeremonyType ceremonyType) {
+        return create(tenant, userRefId, ceremonyType, properties.getChallenge().getTtlSeconds());
+    }
+
+    /**
+     * 帶自訂 TTL 的版本，供跨裝置 QR 登入（情境三）使用：該 ceremony type 的 challenge TTL
+     * 依 CLAUDE.md「Challenge 時效」段落 S6 拍板放寬為 120 秒，**僅此 ceremony type 偏離**
+     * 60 秒預設，同裝置流程（呼叫 3 參數版本 {@link #create(Tenant, Long, CeremonyType)}）
+     * 不受影響。見 {@code com.fido.server.service.CrossDeviceLoginService}。
+     */
+    public AuthChallenge create(Tenant tenant, Long userRefId, CeremonyType ceremonyType, int ttlSecondsOverride) {
         byte[] challengeBytes = new byte[32];
         RANDOM.nextBytes(challengeBytes);
 
@@ -48,7 +58,7 @@ public class ChallengeService {
         challenge.setStatus(ChallengeStatus.PENDING);
         Instant now = Instant.now();
         challenge.setCreatedAt(now);
-        challenge.setExpiresAt(now.plusSeconds(properties.getChallenge().getTtlSeconds()));
+        challenge.setExpiresAt(now.plusSeconds(ttlSecondsOverride));
         return authChallengeRepository.save(challenge);
     }
 

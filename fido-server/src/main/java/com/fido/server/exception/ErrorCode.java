@@ -28,7 +28,16 @@ public enum ErrorCode {
     SIGN_COUNTER_REGRESSION(HttpStatus.UNPROCESSABLE_ENTITY),
     CREDENTIAL_REVOKED(HttpStatus.UNPROCESSABLE_ENTITY),
     RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS),
-    INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR);
+    INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR),
+
+    /**
+     * 跨裝置 QR 登入（情境三，api-contract.md §3.4）專屬錯誤碼。{@code xdevId} 為高熵一次性
+     * capability 值、非使用者/裝置識別，不受 D7 防列舉策略約束，查無時回 404 語意正確
+     * （見 §1.2.2 / D16）。
+     */
+    XDEV_SESSION_NOT_FOUND(HttpStatus.NOT_FOUND),
+    XDEV_SESSION_EXPIRED(HttpStatus.BAD_REQUEST),
+    XDEV_SESSION_INVALID_STATE(HttpStatus.CONFLICT);
 
     private final HttpStatus httpStatus;
 

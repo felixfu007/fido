@@ -2,26 +2,17 @@ package com.fido.credentialprovider.ui
 
 import android.content.Intent
 import android.os.Bundle
-import android.util.Base64
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
-import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
-import androidx.core.content.ContextCompat
 import androidx.credentials.GetCredentialResponse
 import androidx.credentials.GetPublicKeyCredentialOption
 import androidx.credentials.PublicKeyCredential
 import androidx.credentials.exceptions.GetCredentialUnknownException
 import androidx.credentials.provider.PendingIntentHandler
 import com.fido.credentialprovider.keystore.LocalCredentialStore
-import com.fido.credentialprovider.webauthn.AuthenticatorDataBuilder
-import com.fido.credentialprovider.webauthn.ClientDataBuilder
+import com.fido.credentialprovider.webauthn.AssertionSigner
 import com.fido.credentialprovider.webauthn.OriginResolver
 import org.json.JSONObject
-import java.security.KeyStore
-import java.security.MessageDigest
-import java.security.PrivateKey
-import java.security.Signature
 
 /**
  * 【清單項目 6】使用者在系統 Credential Manager bottom sheet 選擇某個本機 passkey entry 後，
@@ -125,6 +116,11 @@ class GetPasskeyActivity : AppCompatActivity() {
         )
     }
 
+    /**
+     * 簽章核心已抽到 [AssertionSigner]（見該物件檔頭「重構原則」說明），本方法只負責執行緒調度
+     * 與把結果交還系統 Credential Manager；行為與抽出前逐字相同，包含「Keystore 找不到別名」與
+     * 「其他未預期例外」兩種錯誤訊息文案的區分。
+     */
     private fun performAssertion(
         credentialIdB64Url: String,
         rpId: String,
@@ -134,57 +130,27 @@ class GetPasskeyActivity : AppCompatActivity() {
     ) {
         Thread {
             try {
-                val alias = LocalCredentialStore.aliasFor(credentialIdB64Url)
-                val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-                if (!keyStore.containsAlias(alias)) {
-                    Log.e(TAG, "Keystore 找不到別名 $alias（可能已被系統或使用者清除）")
-                    runOnUiThread { finishWithError("Key not found for this credential") }
-                    return@Thread
-                }
-                val privateKey = keyStore.getKey(alias, null) as PrivateKey
-
-                // sign counter：本機維護，見 LocalCredentialStore 說明；每次成功簽章遞增 1。
-                val newCount = LocalCredentialStore.getSignCount(this, credentialIdB64Url) + 1
-
-                val authenticatorData = AuthenticatorDataBuilder.buildForAssertion(
-                    rpId = rpId,
-                    userVerified = true,
-                    signCount = newCount,
-                )
-                val clientDataJson = ClientDataBuilder.build(
-                    type = "webauthn.get",
-                    challengeBase64Url = challengeB64Url,
-                    origin = origin,
-                )
-                val clientDataHash = ClientDataBuilder.resolveClientDataHash(
-                    callerSuppliedClientDataHash,
-                    clientDataJson,
-                )
-
-                val signature = Signature.getInstance("SHA256withECDSA").apply {
-                    initSign(privateKey)
-                    update(authenticatorData)
-                    update(clientDataHash)
-                }.sign()
-
-                LocalCredentialStore.setSignCount(this, credentialIdB64Url, newCount)
-
-                Log.i(TAG, "assertion 簽章完成：credentialId=$credentialIdB64Url signCount=$newCount")
-
-                val authenticationResponseJson = buildAssertionResponseJson(
+                val signed = AssertionSigner.sign(
+                    context = this,
                     credentialIdB64Url = credentialIdB64Url,
-                    clientDataJson = clientDataJson,
-                    authenticatorData = authenticatorData,
-                    signature = signature,
+                    rpId = rpId,
+                    challengeB64Url = challengeB64Url,
+                    origin = origin,
+                    callerSuppliedClientDataHash = callerSuppliedClientDataHash,
                 )
+
+                Log.i(TAG, "assertion 簽章完成：credentialId=$credentialIdB64Url signCount=${signed.newSignCount}")
 
                 runOnUiThread {
-                    val credential = PublicKeyCredential(authenticationResponseJson)
+                    val credential = PublicKeyCredential(signed.assertionResponseJson)
                     val resultData = Intent()
                     PendingIntentHandler.setGetCredentialResponse(resultData, GetCredentialResponse(credential))
                     setResult(RESULT_OK, resultData)
                     finish()
                 }
+            } catch (e: AssertionSigner.KeyNotFoundException) {
+                Log.e(TAG, "Keystore 找不到別名（可能已被系統或使用者清除）：${e.message}")
+                runOnUiThread { finishWithError(e.message ?: "Key not found for this credential") }
             } catch (e: Exception) {
                 Log.e(TAG, "登入流程發生未預期例外：${e.message}", e)
                 runOnUiThread { finishWithError("Unexpected error: ${e.message}") }
@@ -192,59 +158,10 @@ class GetPasskeyActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun buildAssertionResponseJson(
-        credentialIdB64Url: String,
-        clientDataJson: ByteArray,
-        authenticatorData: ByteArray,
-        signature: ByteArray,
-    ): String {
-        val response = JSONObject()
-            .put("clientDataJSON", b64UrlEncode(clientDataJson))
-            .put("authenticatorData", b64UrlEncode(authenticatorData))
-            .put("signature", b64UrlEncode(signature))
-
-        return JSONObject()
-            .put("id", credentialIdB64Url)
-            .put("rawId", credentialIdB64Url)
-            .put("type", "public-key")
-            .put("clientExtensionResults", JSONObject())
-            .put("response", response)
-            .toString()
-    }
-
+    /** 已抽到 [UserVerificationGate]（見該物件檔頭「重構原則」說明），這裡保留同名私有方法委派呼叫，
+     * 不改動 [onCreate] 的呼叫方式。 */
     private fun requireUserVerification(title: String, onSuccess: () -> Unit, onFailure: (String) -> Unit) {
-        val biometricManager = BiometricManager.from(this)
-        val allowed = BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        val canAuthenticate = biometricManager.canAuthenticate(allowed)
-        if (canAuthenticate != BiometricManager.BIOMETRIC_SUCCESS) {
-            Log.w(TAG, "此裝置無可用的生物辨識/裝置解鎖（code=$canAuthenticate），PoC 環境下改為直接放行 UV。")
-            onSuccess()
-            return
-        }
-
-        val executor = ContextCompat.getMainExecutor(this)
-        val prompt = BiometricPrompt(
-            this,
-            executor,
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    onSuccess()
-                }
-
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    onFailure("errorCode=$errorCode $errString")
-                }
-
-                override fun onAuthenticationFailed() {
-                    // 允許重試，不在此結束流程。
-                }
-            },
-        )
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(title)
-            .setAllowedAuthenticators(allowed)
-            .build()
-        prompt.authenticate(promptInfo)
+        UserVerificationGate.require(this, title, onSuccess, onFailure)
     }
 
     private fun finishWithError(message: String) {
@@ -253,9 +170,4 @@ class GetPasskeyActivity : AppCompatActivity() {
         setResult(RESULT_CANCELED, resultData)
         finish()
     }
-
-    private fun b64UrlEncode(bytes: ByteArray): String =
-        Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-
-    private fun sha256(input: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(input)
 }

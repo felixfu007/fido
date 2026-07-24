@@ -23,6 +23,7 @@ import java.security.spec.ECPoint;
 import java.security.spec.ECPublicKeySpec;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -121,13 +122,17 @@ public class FidoSessionJwtValidator {
         String credentialId = claims.get("cid", String.class);
         String deviceId = claims.get("did", String.class);
         Long authTime = claims.get("auth_time", Long.class);
+        List<?> rawAmr = claims.get("amr", List.class);
+        List<String> amr = rawAmr == null ? List.of()
+                : rawAmr.stream().map(String::valueOf).toList();
 
         if (externalUserId == null || externalUserId.isBlank()) {
             throw new JwtValidationException("MISSING_SUB", "Session JWT 缺少 sub（externalUserId）。");
         }
 
-        log.info("Session JWT 驗證通過：sub={}, tid={}, did={}, jti={}", externalUserId, tenantId, deviceId, jti);
-        return new ValidatedFidoSession(externalUserId, tenantId, credentialId, deviceId,
+        log.info("Session JWT 驗證通過：sub={}, tid={}, did={}, amr={}, jti={}",
+                externalUserId, tenantId, deviceId, amr, jti);
+        return new ValidatedFidoSession(externalUserId, tenantId, credentialId, deviceId, amr,
                 authTime == null ? 0L : authTime, jti);
     }
 

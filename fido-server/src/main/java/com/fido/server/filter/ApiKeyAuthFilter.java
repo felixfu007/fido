@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * 【真實實作】依 api-contract.md 1.2 實作 {@code X-API-Key} 租戶認證：
@@ -30,6 +31,18 @@ import java.util.UUID;
  *   <li>超過速率限制 -&gt; 429 RATE_LIMITED + {@code Retry-After}</li>
  * </ul>
  * 公開端點（JWKS、actuator health）不需 API Key，見 {@link #PUBLIC_PATH_PREFIXES}。
+ *
+ * <p><b>跨裝置 QR 登入（情境三）capability 認證例外</b>（api-contract.md §1.2.2 / D16）：
+ * claim（{@code POST .../cross-device/sessions/{xdevId}/claim}）、result
+ * （{@code POST .../cross-device/sessions/{xdevId}/result}）與 deny
+ * （{@code POST .../cross-device/sessions/{xdevId}/deny}，§3.4.E）三個端點由手機 App 直連，
+ * **不帶** {@code X-API-Key}，改以路徑上的不透明 {@code xdevId} 作 capability 認證
+ * （租戶由 {@code xdevId} 反查，見 {@code CrossDeviceLoginService}）。這三個端點因此也繞過本
+ * filter（見 {@link #XDEV_CAPABILITY_PATH}），但**不是**公開端點——{@code TenantContext} 對
+ * 這三個端點不會被設定，{@code CrossDeviceLoginController} 不得呼叫
+ * {@code TenantContext.require()}，租戶認證完全由 service 層依 {@code xdevId} 查
+ * {@code cross_device_sessions} 自行把關。§3.4 另兩個端點（A 建立 session、D 輪詢狀態）
+ * 仍由購物網站後端以 {@code X-API-Key} 呼叫，不受此例外影響。
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 10)
@@ -42,6 +55,9 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
             "/api/v1/.well-known/jwks.json",
             "/actuator"
     );
+
+    private static final Pattern XDEV_CAPABILITY_PATH = Pattern.compile(
+            "^/api/v1/authentication/cross-device/sessions/[^/]+/(claim|result|deny)$");
 
     private final TenantRepository tenantRepository;
     private final ApiKeyService apiKeyService;
@@ -59,7 +75,8 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
-        return PUBLIC_PATH_PREFIXES.stream().anyMatch(path::startsWith);
+        return PUBLIC_PATH_PREFIXES.stream().anyMatch(path::startsWith)
+                || XDEV_CAPABILITY_PATH.matcher(path).matches();
     }
 
     @Override

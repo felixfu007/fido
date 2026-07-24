@@ -15,5 +15,11 @@ public interface AuthChallengeRepository {
 
     Optional<AuthChallenge> findByCeremonyId(String ceremonyId);
 
+    /**
+     * 依內部 PK 反查（供跨裝置 QR 登入 {@code cross_device_sessions.challenge_pk} 1:1 外鍵
+     * join 回 {@code auth_challenges} 使用，見 {@code CrossDeviceLoginService}）。
+     */
+    Optional<AuthChallenge> findByChallengePk(Long challengePk);
+
     AuthChallenge save(AuthChallenge challenge);
 }

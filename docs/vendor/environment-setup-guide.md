@@ -13,7 +13,7 @@
 | 元件 | 說明 | 由誰部署 |
 |---|---|---|
 | **`fido-server`** | FIDO2 驗證伺服器（Spring Boot 3 / Java 21）。對外提供 REST API。 | 採用廠商 |
-| **SQL Server 資料庫** | `fido-server` 專用的獨立資料庫實例（七張核心表），與貴公司其他系統的資料庫分開。 | 採用廠商 |
+| **SQL Server 資料庫** | `fido-server` 專用的獨立資料庫實例（九張核心表），與貴公司其他系統的資料庫分開。 | 採用廠商 |
 
 其餘兩個元件**不需要**採用廠商部署：
 
@@ -64,11 +64,11 @@
 | 順序 | 腳本 | 用途 | 執行對象 |
 |---|---|---|---|
 | 1 | `001_create_database.sql` | 建立 `FidoServerDb` 資料庫、設定 FULL 復原模式、`READ_COMMITTED_SNAPSHOT ON` 等資料庫層級設定 | 對「SQL Server 執行個體」執行（資料庫尚未存在） |
-| 2 | `002_create_tables.sql` | 建立七張核心表（依外鍵相依順序：`tenants` → `fido_user_ref` → `fido_credentials` → `bound_devices` → `auth_challenges` → `audit_log` → `tenant_app_bindings`），含 PK/UNIQUE/CHECK/FK | 對 `FidoServerDb` 執行 |
+| 2 | `002_create_tables.sql` | 建立九張核心表（依外鍵相依順序：`tenants` → `fido_user_ref` → `fido_credentials` → `bound_devices` → `auth_challenges` → `audit_log` → `tenant_app_bindings` → `signing_keys` → `cross_device_sessions`），含 PK/UNIQUE/CHECK/FK | 對 `FidoServerDb` 執行 |
 | 3 | `003_create_indexes.sql` | 建立各表的非唯一次要索引 | 對 `FidoServerDb` 執行 |
 | 4 | `004_enable_tde.sql` | 啟用 TDE 全庫加密（建立 master key、TDE 憑證、DEK、`ENCRYPTION ON`），並**立即備份憑證與私鑰** | 需 sysadmin |
 | 5 | `005_scheduled_backups.sql` | 建立三個備份 Agent Job：完整備份（每週日 01:00）、差異備份（每日 02:00）、交易記錄備份（每 30 分鐘） | 對 `msdb` 執行，需 SQL Agent |
-| 6 | `006_retention_cleanup_jobs.sql` | 建立三個清理 Agent Job：challenge 過期標記（每分鐘）、清除逾期 challenge（每日 03:15）、`audit_log` 保留 1 年清理（每日 03:30） | 對 `msdb` 執行，需 SQL Agent |
+| 6 | `006_retention_cleanup_jobs.sql` | 建立五個清理 Agent Job：challenge 過期標記（每分鐘）、cross-device session 過期標記（每分鐘）、清除逾期 cross-device session（每日 03:10）、清除逾期 challenge（每日 03:15）、`audit_log` 保留 1 年清理（每日 03:30） | 對 `msdb` 執行，需 SQL Agent |
 
 ### 3.1 執行前必做的替換
 

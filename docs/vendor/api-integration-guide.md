@@ -60,6 +60,8 @@
 | 3.1 | POST | `/api/v1/authentication/options` | 產生登入 challenge |
 | 3.2 | POST | `/api/v1/authentication/result` | 提交登入結果（驗證 assertion、簽發 JWT） |
 | 3.3 | GET | `/api/v1/.well-known/jwks.json` | JWKS 公鑰（公開端點） |
+| 3.4.A | POST | `/api/v1/authentication/cross-device/sessions` | 建立跨裝置 QR 登入 session（第 11 節） |
+| 3.4.D | GET | `/api/v1/authentication/cross-device/sessions/{xdevId}/status` | 桌機輪詢跨裝置登入狀態 / 取 JWT（第 11 節） |
 | 4.1 | GET | `/api/v1/users/{externalUserId}/devices` | 列出使用者已註冊裝置 |
 | 4.2 | DELETE | `/api/v1/users/{externalUserId}/devices/{deviceId}` | 撤銷裝置（軟刪除） |
 | 5.1 | GET | `/api/v1/users/{externalUserId}/fido-status` | 查詢使用者 FIDO 綁定狀態 |
@@ -148,7 +150,7 @@ Claims：
 | `tid` | 租戶 ID（`tenant_uid`） |
 | `cid` | 本次驗證所用 `credential_id`（base64url） |
 | `did` | 本次驗證所用 `device_id` |
-| `amr` | 固定 `["fido","hwk"]` |
+| `amr` | 同裝置登入為 `["fido","hwk"]`；**跨裝置 QR 登入（第 11 節）額外帶 `"xdev"`，即 `["fido","hwk","xdev"]`**。貴公司後端**必須**檢查此陣列是否含 `"xdev"`，據以對敏感操作要求 step-up（見第 11 節） |
 | `auth_time` | 驗證完成的 epoch 秒 |
 | `iat` / `exp` | 簽發 / 到期（差 120 秒） |
 | `jti` | 一次性 token ID |
@@ -479,3 +481,50 @@ Response 200：
 - [ ] 對 `429 RATE_LIMITED` 做退避重試
 - [ ] 前端以回應 body 判斷狀態，而非 HTTP 狀態碼（防列舉，第 8 節）
 - [ ] 若走原生 App 情境，已完成 `assetlinks.json` + `tenant_app_bindings` 登錄（第 7 節）
+- [ ] 若走桌機 QR 跨裝置登入，已對 `amr` 含 `"xdev"` 的 session 標記為較弱來源、敏感操作要求 step-up（第 11 節）
+
+---
+
+## 11. 桌機 QR 跨裝置登入串接（情境三）
+
+> 本節對應合約 [`../api-contract.md`](../api-contract.md) §3.4，以及能力/限制說明 [`technical-limitations.md`](technical-limitations.md) 第 2.2 節。**實作狀態**：架構已拍板、規格已定，但功能**尚在實作中**，導入前請向平台營運方確認貴公司取得的版本是否已提供。
+
+讓桌機使用者用手機掃 QR 完成 FIDO 登入。桌機端只顯示 QR 與輪詢結果，真正的簽章由手機 App 用其既有硬體憑證完成。
+
+### 11.1 呼叫方拆分（重要）
+
+跨裝置流程有四個 fido-server 端點，分兩類呼叫方：
+
+| 端點 | 呼叫方 | 認證 | 貴公司要做的事 |
+|---|---|---|---|
+| A `POST .../cross-device/sessions` | **貴公司後端** | `X-API-Key` + `desktopClientIp` | 代桌機建立 session，取回 `xdevId`/`qrUrl`/`verificationCode` |
+| B `POST .../{xdevId}/claim` | **手機 App 直連** | `xdevId`（不帶 API Key） | **無**——手機 App（平台提供）直接打，貴公司不經手 |
+| C `POST .../{xdevId}/result` | **手機 App 直連** | `xdevId`（不帶 API Key） | **無**——同上 |
+| D `GET .../{xdevId}/status` | **貴公司後端** | `X-API-Key` + `desktopClientIp` | 代桌機輪詢；`CONFIRMED` 時取回 session JWT |
+
+貴公司只串接 A 與 D；B/C 是手機 App 與 fido-server 之間的事，貴公司後端不參與。
+
+### 11.2 串接流程
+
+1. 桌機登入頁按「用手機掃碼登入」→ 貴公司後端呼叫 **A**，帶 `desktopClientIp`（= 桌機瀏覽器真實 client IP，從貴公司自己請求的 `remoteAddr`/`X-Forwarded-For` 取得後轉發；伺服器看到的直接來源是貴公司後端、非桌機）。取回 `xdevId`/`qrUrl`/`verificationCode`/`expiresIn`（120 秒）。
+2. 桌機把 `qrUrl` 顯示成 QR，並顯示 `verificationCode` 供使用者與手機畫面比對。**`xdevId` 是能力憑證，貴公司後端應以 httpOnly cookie 或伺服器端對映把它綁定到這個桌機瀏覽器 session，不要把 `xdevId` 直接回給前端 JS**（避免第三方拿到 `xdevId` 冒領結果）。
+3. 桌機每 2–3 秒請貴公司後端輪詢 → 後端帶 `desktopClientIp` 呼叫 **D**：
+   - `PENDING`/`SCANNED` → 尚未完成，繼續輪詢。
+   - `CONFIRMED` → 回應含 `session.token`（JWT）與 `warnings.proximityMismatch`。**此 JWT 只能領一次**（領後 session 轉 `CONSUMED`）。
+   - `DENIED`（使用者在手機取消 / 手機上無對應憑證）→ 停止輪詢、顯示對應訊息。
+   - 逾時 → `XDEV_SESSION_EXPIRED` / `EXPIRED`，顯示「QR 已過期，請重新產生」。
+4. 拿到 `CONFIRMED` + JWT 後，**收尾與一般登入完全相同**：依第 4 節驗 JWT（JWKS 驗簽 + iss/aud/exp/jti），驗過才建立自家登入 session。**不要**只看回應的 `status`。
+
+### 11.3 必做：對 `amr` 含 `"xdev"` 的 session 限制敏感操作（step-up）
+
+這是跨裝置登入能安全上線的**關鍵責任**，落在貴公司後端：
+
+- 驗過的 session JWT，若 `amr` 陣列含 `"xdev"`，代表這是經**較弱的 cross-device 路徑**取得的登入（防釣魚弱於同裝置，見技術限制手冊第 2.2 節）。
+- 貴公司後端建立自家 session 時**應記錄此來源**，並在授權層對**敏感操作**（改密碼、綁定/解綁、金流交易、撤銷 FIDO 裝置、修改個資等）**要求 step-up 驗證**——例如引導使用者在同裝置重新做一次 FIDO 或帳密驗證後才放行。
+- 低風險操作（瀏覽、加入購物車等）可正常放行。
+- **平台不會、也無法代貴公司強制這件事**：fido-server 只誠實在 `amr` 標記登入路徑強度，它不是身分來源、也不知道貴公司「哪個動作算敏感」（與第 6 節 `externalUserId` 責任邊界同理）。若貴公司後端忽略 `"xdev"` 標記直接放行敏感操作，等於自行放棄了限縮範圍這層保護。
+- `shopping-site-reference` 參考範例會示範此 step-up 判斷邏輯，請照抄其模式。
+
+### 11.4 proximity 只警示、不阻擋
+
+D 回應的 `warnings.proximityMismatch=true` 代表「桌機與手機的網路出口 IP 不一致」（可能是遠端中繼，也可能只是手機走行動網路、桌機走 Wi-Fi 的正常誤判）。**系統不會因此擋下登入**（平台決策為警示制）。貴公司後端可把此訊號納入自己的風控/紀錄，但不應假設「沒有 mismatch = 安全」。維運層的追蹤見維護手冊第 11 節。

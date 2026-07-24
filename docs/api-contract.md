@@ -1,11 +1,13 @@
 # FIDO 驗證伺服器 — REST API 合約
 
 - 版本：v1（草案，待人工複核）
-- 最後更新：2026-07-23
-- 適用架構情境：A（標準 WebAuthn，同裝置）
+- 最後更新：2026-07-24
+- 適用架構情境：A（標準 WebAuthn，同裝置）為主；另含情境三（跨裝置 QR transaction confirmation，見 §3.4）
 - 對應共識文件：`d:\fido\CLAUDE.md`
 
-> 本文件是 **FIDO 驗證伺服器對外的後端 REST API 合約**。所有端點的呼叫方（除 JWKS 與 health 外）都是 **購物網站的後端**（租戶 backend），以 server-to-server 方式呼叫，並以 API Key 表明租戶身分。FIDO 驗證 APP（Android CredentialProviderService）不直接呼叫本 API；它透過同裝置的 WebAuthn / Credential Manager 與購物網站前端互動，產生的 attestation / assertion 由購物網站前端交回購物網站後端，再由後端轉呼叫本 API 驗證。
+> 本文件是 **FIDO 驗證伺服器對外的後端 REST API 合約**。所有端點的呼叫方（除 JWKS、health、以及 §3.4 兩個手機直連端點外）都是 **購物網站的後端**（租戶 backend），以 server-to-server 方式呼叫，並以 API Key 表明租戶身分。同裝置情境（A）下，FIDO 驗證 APP（Android CredentialProviderService）不直接呼叫本 API；它透過同裝置的 WebAuthn / Credential Manager 與購物網站前端互動，產生的 attestation / assertion 由購物網站前端交回購物網站後端，再由後端轉呼叫本 API 驗證。
+>
+> **例外（情境三，見 §3.4）**：跨裝置 QR 登入中，手機 App **會直連**本 API 的 claim / result 兩個端點，且**不帶 X-API-Key**，改以不透明 `xdevId` capability 認證（租戶由 `xdevId` 反查）。這是刻意的新增呼叫方類別，見 §1.2 呼叫方類別說明。
 >
 > 凡標記 **【本文件補充決策】** 者，為 CLAUDE.md 未覆蓋、由系統分析師於本文件先行決定的細節，需人工複核後回填 CLAUDE.md。全部清單見文末附錄 A。
 
@@ -17,6 +19,7 @@
    - 1.1 Base path 與版本策略
    - 1.2 租戶識別與認證（API Key）
      - 1.2.1 終端使用者身分驗證是呼叫端的責任（防 IDOR）
+     - 1.2.2 呼叫方類別：手機 App 直連、以 `xdevId` capability 認證（情境三）
    - 1.3 短時效自簽 JWT（session 交接）
    - 1.4 通用錯誤格式與錯誤碼
    - 1.5 資料編碼慣例
@@ -27,6 +30,7 @@
    - 3.1 產生登入 challenge
    - 3.2 提交登入結果（含 sign counter 與自動撤銷、JWT 簽發）
    - 3.3 JWKS 公鑰端點
+   - 3.4 跨裝置 QR 登入（情境三）
 4. [裝置管理 API](#4-裝置管理-api)
    - 4.1 列出使用者已註冊裝置
    - 4.2 撤銷 / 刪除裝置
@@ -78,6 +82,13 @@
 
 > 端點 3.3（JWKS）與 health 端點為**公開端點**，不需 API Key。
 
+#### 1.2.2 呼叫方類別：手機 App 直連、以 `xdevId` capability 認證（情境三）
+
+- **【本文件補充決策 D16】** 跨裝置 QR 登入（§3.4）打破「所有端點呼叫方皆為購物網站後端、以 X-API-Key 表明租戶」的前提。§3.4 的三個端點（B `.../claim`、C `.../result`、E `.../deny`）由**手機 App 直連** fido-server，**不帶 X-API-Key**，改以路徑上的不透明高熵一次性 `xdevId` 作 **capability（bearer）認證**：伺服器由 `xdevId` 反查 `cross_device_sessions` → `tenant_id` 決定租戶。
+- 理由：多租戶下手機 App 是單一營運方 App、服務多個租戶，掃 QR 當下無從得知該打哪個租戶的 API Key，也不應持有任何租戶的 API Key；`xdevId` 由伺服器在 §3.4 端點 A 建立 session 時產生、只承載於 QR、高熵不可猜、一次性、綁定單一 session，最適合作能力憑證。
+- §3.4 的另兩個端點（A `POST .../sessions`、D `GET .../sessions/{xdevId}/status`）**仍由購物網站後端**呼叫，**仍帶 X-API-Key**（與其他所有後端端點一致），另加 `desktopClientIp` 欄位轉發桌機瀏覽器的真實 client IP（proximity 稽核用，見 §3.4）。（端點 E `.../deny` 為手機端主動放棄訊號，屬手機直連類別，見上一點。）
+- **防列舉**：`xdevId` 是高熵一次性 capability 值、**非**使用者/裝置識別，不受 D7 防帳號列舉策略約束（D7 針對的是「使用者/裝置是否存在」的探測，`xdevId` 不洩漏任何此類資訊）。故 `xdevId` 查無時回 `404 XDEV_SESSION_NOT_FOUND` 語意正確、無列舉風險。
+
 ### 1.3 短時效自簽 JWT（session 交接）
 
 - 用途：登入成功後，FIDO 伺服器簽發一枚短時效 JWT 交給購物網站，作為「此使用者剛通過 FIDO 硬體驗證」的憑證，供購物網站建立自己的登入 session。
@@ -94,12 +105,19 @@
   | `tid` | string | 租戶 ID |
   | `cid` | string | 本次驗證所用 `credential_id`（base64url） |
   | `did` | string | 本次驗證所用 `device_id`（`bound_devices`） |
-  | `amr` | string[] | 認證方式，固定 `["fido","hwk"]`（hardware key） |
+  | `amr` | string[] | 認證方式參照（Authentication Method Reference）。同裝置情境（A）為 `["fido","hwk"]`（hardware key）。**跨裝置 QR 登入（情境三，§3.4）額外帶 `"xdev"`，即 `["fido","hwk","xdev"]`**（見下方 `amr` 與 cross-device 標記說明 **【D17】**）。 |
   | `auth_time` | number | 驗證完成的 epoch 秒 |
   | `iat` / `exp` | number | 簽發 / 到期，`exp - iat = 120` |
   | `jti` | string | 一次性 token ID；購物網站**應**做一次性消費防重放 |
 
 - 驗證方式：購物網站以端點 3.3 的 JWKS 公鑰驗簽，並自行校驗 `iss` / `aud`（= 自己網域）/ `exp` / `jti` 未用過。
+
+**`amr` 與 cross-device 登入標記（step-up 依據）【本文件補充決策 D17，本次新增】**：
+
+- **背景**：cross-device QR 登入（§3.4）在防釣魚上本質弱於同裝置 WebAuthn（見 `docs/decisions/qr-cross-device-login-design.md` 第 5 節），故 CLAUDE.md 決策「跨裝置 QR 登入 — 使用範圍限制（S7）」限縮其可用範圍：以此路徑取得的 session 只應用於低風險動作，敏感動作（改密碼、金流、裝置撤銷/管理）仍須同裝置 step-up。
+- **標記機制**：fido-server 於 §3.4 端點 C 簽發的 session JWT，其 `amr` **在 `["fido","hwk"]` 之外多帶一個 `"xdev"` 值**。同裝置登入（§3.2）不帶 `"xdev"`。這是**購物網站後端（或任何驗證此 JWT 的下游）辨識「本次 session 是否經 cross-device 較弱路徑取得」的唯一權威依據**。
+- **下游應如何用**：驗過 JWT（§1.3 / 採用廠商手冊第 4 節）後，若 `amr` 陣列含 `"xdev"`，下游在自己的授權層對敏感操作**必須要求 step-up 驗證**（例如引導使用者在同裝置重新做一次 FIDO 或帳密驗證），**不可**憑此 session 直接放行敏感操作。低風險操作（瀏覽、加入購物車、一般結帳前流程等）可正常放行。
+- **責任邊界**：fido-server **只誠實標記登入路徑強度、不強制 S7**——它非身分來源、也看不到下游「哪個動作算敏感」，enforcement 落在下游後端（與 §1.2.1 / D15「終端使用者授權把關由呼叫端負責」的責任邊界一致）。`shopping-site-reference` 會示範此 step-up 判斷邏輯供採用廠商參照。
 
 ### 1.4 通用錯誤格式與錯誤碼
 
@@ -138,8 +156,13 @@
 | 422 | `ASSERTION_INVALID` | assertion 簽章驗證失敗 |
 | 422 | `SIGN_COUNTER_REGRESSION` | sign counter 倒退，已自動撤銷 |
 | 422 | `CREDENTIAL_REVOKED` | 使用的 credential 已被撤銷 |
+| 404 | `XDEV_SESSION_NOT_FOUND` | 跨裝置 QR 登入 session（`xdevId`）不存在（§3.4）。`xdevId` 為高熵一次性 capability、非使用者/裝置識別，回 404 無列舉風險（見 §1.2.2 / D16） |
+| 400 | `XDEV_SESSION_EXPIRED` | 跨裝置 QR 登入 session 已逾時（超過 120 秒 TTL）或已被消費（§3.4） |
+| 409 | `XDEV_SESSION_INVALID_STATE` | 跨裝置 QR 登入 session 狀態機不允許此操作（例如對非 `PENDING` 的 session 再 claim、對非 `SCANNED` 的 session 提交 result、重複領取已 `CONSUMED` 的結果）（§3.4） |
 | 429 | `RATE_LIMITED` | 超過速率限制 |
 | 500 | `INTERNAL_ERROR` | 伺服器內部錯誤 |
+
+> **關於 proximity（近距/出口 IP）檢查——刻意不設拒絕碼**：CLAUDE.md 決策「跨裝置 QR 登入 — proximity 政策（S2）」拍板為**只警示、不阻擋**。因此 proximity 不符**不是**一個導致 4xx 拒絕的錯誤碼；伺服器改為在 §3.4 端點 C/D 的**成功回應中夾帶一個警示欄位** `proximity`（見 §3.4 回應格式）並於 `audit_log.detail.proximityMismatch=true` 留痕，登入照常完成。（先前設計文件曾提議 `422 XDEV_PROXIMITY_MISMATCH`，已因 S2 拍板為警示制而**移除**，不列入本錯誤碼表。）
 
 **【本文件補充決策 D6】** WebAuthn ceremony 驗證失敗使用 `422 Unprocessable Entity`（請求格式正確但語意驗證未過），與 `400`（格式錯誤）區分，方便呼叫端分流處理。
 
@@ -359,6 +382,174 @@
 
 ---
 
+### 3.4 跨裝置 QR 登入（情境三）
+
+桌機瀏覽器發起、顯示 QR，手機 App 掃碼後作漫遊確認器，用手機上既有已註冊的憑證做一次真正的 WebAuthn assertion 送回；桌機輪詢取得結果。完整設計、時序、威脅模型與殘餘風險見 `docs/decisions/qr-cross-device-login-design.md`；本節僅定合約。**安全前提（擁有者已拍板）**：此路徑防釣魚弱於同裝置（S1 殘餘風險已接受），使用範圍限縮於低風險動作（S7，經 §1.3 / D17 的 `amr` `"xdev"` 標記讓下游對敏感操作要求 step-up）；proximity 檢查**只警示不阻擋**（S2）。
+
+**五個端點（呼叫方 / 認證方式見 §1.2.2 / D16）**：
+
+| # | Method | Path | 呼叫方 | 認證 | 作用 |
+|---|---|---|---|---|---|
+| A | POST | `/api/v1/authentication/cross-device/sessions` | 購物網站後端 | `X-API-Key` + body `desktopClientIp` | 建 session，回 `xdevId`/`qrUrl`/`verificationCode`/`expiresIn` |
+| B | POST | `/api/v1/authentication/cross-device/sessions/{xdevId}/claim` | **手機 App 直連** | `xdevId`（capability，**不帶 X-API-Key**） | `PENDING→SCANNED`，回權威 `rpId`/`origin`/`challenge`/`verificationCode`/`tenantDisplayName` |
+| C | POST | `/api/v1/authentication/cross-device/sessions/{xdevId}/result` | **手機 App 直連** | `xdevId`（capability，**不帶 X-API-Key**） | 驗 assertion（重用既有邏輯）+ proximity 檢查（僅警示），`SCANNED→CONFIRMED` |
+| D | GET | `/api/v1/authentication/cross-device/sessions/{xdevId}/status` | 購物網站後端 | `X-API-Key` + query/header `desktopClientIp` | 回狀態；`CONFIRMED` 時回 session JWT 並 `→CONSUMED` |
+| E | POST | `/api/v1/authentication/cross-device/sessions/{xdevId}/deny` | **手機 App 直連** | `xdevId`（capability，**不帶 X-API-Key**） | 使用者取消 / 本機無對應 rpId 憑證，`PENDING`\|`SCANNED`→`DENIED` + audit |
+
+challenge / xdev session TTL = **120 秒**（S6，僅此 ceremony type，見 CLAUDE.md「Challenge 時效」）。狀態機：`PENDING → SCANNED → CONFIRMED → CONSUMED`，另有 `DENIED`（使用者取消 / 本機無對應 rpId 憑證，由端點 E 觸發）、`EXPIRED`（TTL 到期，由伺服器背景清理 / 輪詢時判定）。每個轉移單向不可逆；claim 只在 `PENDING`、result 只在 `SCANNED`、status 取 JWT 只在 `CONFIRMED` 成功且立即轉 `CONSUMED`（JWT 只能被領一次）、deny 在 `PENDING` 或 `SCANNED` 皆可（見端點 E），違反狀態機 → `409 XDEV_SESSION_INVALID_STATE`。
+
+> **DENIED 與 EXPIRED 的語意區別（為何 DENIED 需要一個主動觸發端點）**：`EXPIRED` 是被動逾時（使用者可能只是分心、離開、網路斷線，資訊量低）；`DENIED` 是使用者**看過確認畫面後主動拒絕**（尤其「不是我，取消」＝可能識破了一次中繼/釣魚嘗試，是強訊號）。在 proximity 採 warn-only（S2）、不阻擋遠端即時中繼的風險態勢下（見 CLAUDE.md 情境三決策定案「S1+S2 風險敞口」段落），使用者於確認畫面上的警覺是少數幾個補償控制之一，而端點 E 的 `DENIED` + `audit_log` 正是讓「使用者主動識破並拒絕」這個訊號被營運方觀察到的唯一途徑。若無此端點、一律走自然逾時 `EXPIRED`，這個稽核/偵測訊號會流失。此設計對應設計文件 §5.2.3 第 3 點（確認畫面「不是我」明確拒絕出口，標為【必要】）與 §4.2 App 端流程，屬**完成既有已拍板設計的落地缺口**，非新架構決策。
+
+---
+
+#### 3.4.A 建立 cross-device session
+
+`POST /api/v1/authentication/cross-device/sessions`（購物網站後端，`X-API-Key`）
+
+**Request**
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `desktopClientIp` | string | 是 | 桌機瀏覽器的真實 client IP（購物網站後端從其自身請求的 `remoteAddr` / `X-Forwarded-For` 取得後轉發）。proximity 稽核基準；伺服器看到的直接來源是購物網站後端 IP、非桌機，故須由後端誠實轉發（後端本為租戶自家可信元件）。 |
+
+**Response 200**
+
+```json
+{
+  "xdevId": "<不透明高熵 base64url>",
+  "qrUrl": "https://<fido-app-link-host>/x/<xdevId>",
+  "verificationCode": "38-421",
+  "expiresIn": 120
+}
+```
+
+- `qrUrl`：桌機編碼成 QR；只承載不透明 `xdevId`（不含 rpId/challenge/使用者資訊），為已驗證的 App Link（見設計文件 3.1 與 origin-binding.md OB7）。
+- `verificationCode`：確認碼，桌機 QR 頁與手機確認畫面各顯示一份供使用者比對（輔助防禦，非主力，見設計文件 5.4）。
+
+**主要錯誤**：`401 UNAUTHENTICATED`、`403 TENANT_DISABLED`、`400 VALIDATION_ERROR`、`429 RATE_LIMITED`。
+
+**核心表對應**：讀 `tenants`；insert `auth_challenges`（`ceremony_type='AUTHENTICATION'`、`user_ref_id=NULL`、`expires_at=now+120s`）；insert `cross_device_sessions`（`status='PENDING'`、`desktop_ip`、`verification_code`、`challenge_pk`）；`audit_log` 記 `XDEV_SESSION_CREATED`，`detail.originType='CROSS_DEVICE_QR'`。
+
+---
+
+#### 3.4.B claim（手機取權威 context）
+
+`POST /api/v1/authentication/cross-device/sessions/{xdevId}/claim`（手機 App 直連，`xdevId` capability，不帶 X-API-Key）
+
+伺服器驗 `xdevId` 存在（否則 `404 XDEV_SESSION_NOT_FOUND`）、未過期（否則 `400 XDEV_SESSION_EXPIRED`）、狀態為 `PENDING`（否則 `409 XDEV_SESSION_INVALID_STATE`），轉 `PENDING→SCANNED`，回權威 context。
+
+**Response 200**
+
+```json
+{
+  "rpId": "shop.example.com",
+  "origin": "https://shop.example.com",
+  "tenantDisplayName": "Example Shop",
+  "challenge": "<base64url 32-byte>",
+  "verificationCode": "38-421",
+  "expiresAt": "2026-07-24T08:00:00Z"
+}
+```
+
+- `rpId` / `origin` **由伺服器依 `xdevId → tenant` 權威給定**，App 與 QR 都不得自行宣稱（見 origin-binding.md OB7）。App 據此 rpId 查本機憑證、據 `origin` 簽 `clientDataJSON`。
+
+**核心表對應**：讀 `cross_device_sessions` join `auth_challenges` + `tenants`；update `cross_device_sessions`（`status='SCANNED'`、`scanned_at`、`phone_ip` 可先記）；`audit_log` 記 `XDEV_CLAIMED`。
+
+---
+
+#### 3.4.C 提交 assertion result（含 proximity 警示）
+
+`POST /api/v1/authentication/cross-device/sessions/{xdevId}/result`（手機 App 直連，`xdevId` capability）
+
+**Request**：body = 標準 assertion JSON（結構同 §3.2 的 `credential.{id,rawId,type,response.{clientDataJSON,authenticatorData,signature,userHandle}}`）。
+
+**伺服器處理**：
+
+1. 狀態須為 `SCANNED`（否則 `409 XDEV_SESSION_INVALID_STATE`）、未過期（否則 `400 XDEV_SESSION_EXPIRED`）。
+2. **assertion 密碼學驗證重用既有 `AuthenticationService.verifyResult`**（以 `xdevId` 反查其 `challenge_pk` 對應 ceremony）：`webauthn.get` 型別、challenge 比對、rpIdHash 比對、origin 允許清單比對、UV flag、公鑰驗簽、sign counter（含倒退自動撤銷）。失敗回既有的 `422 ASSERTION_INVALID` / `422 SIGN_COUNTER_REGRESSION` / `422 CREDENTIAL_REVOKED` 等（與 §3.2 一致）。
+3. **proximity 檢查（只警示不阻擋，S2）**：比對 `cross_device_sessions.desktop_ip`（端點 A 轉來的桌機 IP）與本次手機直連來源 IP。**不一致不拒絕**，只在回應夾帶警示欄位並寫 `audit_log.detail.proximityMismatch=true`。
+4. 通過 → `SCANNED→CONFIRMED`，簽發 session JWT（`amr` 含 `"xdev"`，見 §1.3 / D17）暫存於 session，待端點 D 領取。
+
+**Response 200**
+
+```json
+{
+  "status": "CONFIRMED",
+  "proximity": { "checked": true, "mismatch": false }
+}
+```
+
+- `proximity.mismatch=true` 時，手機確認畫面可據以提示使用者「登入位置與電腦端不一致」，但**登入仍然成功**（警示制）。
+
+**核心表對應**：讀/消費 `auth_challenges`；讀/更新 `fido_credentials`（sign_count/status）、`bound_devices`（last_used_at）；update `cross_device_sessions`（`status='CONFIRMED'`、`confirmed_at`、`phone_ip`、`user_ref_id`、`credential_pk`、`issued_jti`）；`audit_log` 記 `XDEV_CONFIRMED` / 失敗原因，`detail` 含 `originType='CROSS_DEVICE_QR'`、`proximityMismatch`。
+
+---
+
+#### 3.4.D 桌機輪詢狀態 / 取 JWT
+
+`GET /api/v1/authentication/cross-device/sessions/{xdevId}/status`（購物網站後端，`X-API-Key`）
+
+購物網站後端每 2–3 秒代桌機輪詢（既有每租戶 100 TPS 已足吸收）。帶 `desktopClientIp`（同端點 A）。
+
+**Response 200**（依狀態）
+
+```json
+{
+  "status": "CONFIRMED",
+  "session": { "token": "<JWT，amr 含 xdev>", "tokenType": "Bearer", "expiresIn": 120 },
+  "warnings": { "proximityMismatch": false }
+}
+```
+
+- `status` 為 `PENDING`/`SCANNED` → 回該狀態、無 `session`（桌機繼續輪詢）。
+- `status` 為 `CONFIRMED` → **回 session JWT 並立即將 session 轉 `CONSUMED`**（JWT 只能被領一次；再次輪詢回 `409 XDEV_SESSION_INVALID_STATE` 或 `EXPIRED`）。`warnings.proximityMismatch` 反映本次 cross-device 登入的 proximity 檢查結果，供購物網站後端記錄/風控。
+- `status` 為 `DENIED`（使用者取消 / 本機無憑證）→ 回 `DENIED`，桌機顯示對應訊息並停止輪詢。
+- session 逾時 → `400 XDEV_SESSION_EXPIRED`（或 `status:"EXPIRED"`），桌機顯示「QR 已過期，請重新產生」。
+
+**購物網站後端收尾（同 §3.2 信任邊界）**：**不信任任何 `status`/`confirmed` 布林**，只信 JWKS 驗過簽的 session JWT（見 §1.3）。驗過後，因 `amr` 含 `"xdev"`，建立的自家 session **應標記為 cross-device 來源**，供後續敏感操作 step-up 判斷（§1.3 / D17）。
+
+**核心表對應**：讀 `cross_device_sessions`；`CONFIRMED` 時 update（`status='CONSUMED'`、`consumed_at`）；`audit_log` 記 `XDEV_CONSUMED`。
+
+---
+
+#### 3.4.E 手機主動放棄（使用者取消 / 本機無憑證）
+
+`POST /api/v1/authentication/cross-device/sessions/{xdevId}/deny`（手機 App 直連，`xdevId` capability，不帶 X-API-Key）
+
+手機端於下列兩種情形呼叫此端點，讓伺服器把 session 主動轉為 `DENIED` 並留下即時稽核訊號（對應設計文件 §4.2 步驟 3/4）：
+
+1. **使用者在確認畫面按「不是我，取消」**（`reason=USER_CANCELLED`）——最具偵測價值的訊號：可能是使用者識破了一次中繼/釣魚嘗試。
+2. **claim 後發現本機無該 rpId 的 active 憑證**（`reason=NO_CREDENTIAL`）——通常為良性（此裝置根本沒註冊該租戶）。
+
+**與被動逾時（EXPIRED）的差異、以及此端點存在的理由**：見上方 §3.4 開頭「DENIED 與 EXPIRED 的語意區別」說明。
+
+**Request**
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `reason` | string | 否 | 放棄原因，列舉值 `USER_CANCELLED` / `NO_CREDENTIAL`。省略時伺服器記為 `UNSPECIFIED`。**僅供稽核分類，不影響狀態轉移結果**（無論哪個原因都轉 `DENIED`）；伺服器不信任此值作任何授權判斷，僅原樣寫入 `audit_log.detail.denyReason`。 |
+
+**伺服器處理**：
+
+1. 驗 `xdevId` 存在（否則 `404 XDEV_SESSION_NOT_FOUND`）、未過期（否則 `400 XDEV_SESSION_EXPIRED`）。
+2. 狀態須為 `PENDING` 或 `SCANNED` → 轉 `DENIED`，回 200。
+3. **冪等**：若已是 `DENIED`，回 200（不重複寫稽核，或寫 `matched:false` 補記，dev 擇一，對呼叫端回應無差異）。
+4. 若為終端成功狀態 `CONFIRMED` / `CONSUMED`（登入已完成）→ `409 XDEV_SESSION_INVALID_STATE`（不允許事後把已完成的登入翻成 DENIED）。
+
+**Response 200**
+
+```json
+{ "status": "DENIED" }
+```
+
+**主要錯誤**：`404 XDEV_SESSION_NOT_FOUND`、`400 XDEV_SESSION_EXPIRED`、`409 XDEV_SESSION_INVALID_STATE`。（此端點不做密碼學驗證，無 `422` 類錯誤；不新增任何錯誤碼，沿用 §1.4 既有 `XDEV_*`。）
+
+**與桌機輪詢的銜接**：端點 E 轉 `DENIED` 後，購物網站後端下次 poll（端點 D）即依既有合約（§3.4.D）取得 `status:"DENIED"` 並停止輪詢、顯示對應訊息——**端點 D 無需任何改動**（其 DENIED 回應路徑本已定義）。
+
+**核心表對應**：讀 `cross_device_sessions`（驗 `xdevId`/狀態/時效）；update `cross_device_sessions`（`status='DENIED'`、`updated_at`）；`audit_log` 記 `XDEV_DENIED`，`detail` 含 `originType='CROSS_DEVICE_QR'`、`denyReason`（`USER_CANCELLED`/`NO_CREDENTIAL`/`UNSPECIFIED`）。
+
+---
+
 ## 4. 裝置管理 API
 
 > 對應 CLAUDE.md「允許使用者註冊多台裝置，提供管理介面」。這些端點由購物網站後端（使用者已帳密登入的裝置管理頁）呼叫。
@@ -503,6 +694,11 @@
 | 3.1 | POST | `/api/v1/authentication/options` | R `fido_user_ref`,`fido_credentials`；C `auth_challenges`；C `audit_log` |
 | 3.2 | POST | `/api/v1/authentication/result` | RU `auth_challenges`,`fido_credentials`,`bound_devices`；R `tenant_app_bindings`(origin 為 app origin 時)；C `audit_log` |
 | 3.3 | GET | `/api/v1/.well-known/jwks.json` | （伺服器金鑰設定，無表） |
+| 3.4.A | POST | `/api/v1/authentication/cross-device/sessions` | R `tenants`；C `auth_challenges`,`cross_device_sessions`；C `audit_log` |
+| 3.4.B | POST | `/api/v1/authentication/cross-device/sessions/{xdevId}/claim` | R `cross_device_sessions`,`auth_challenges`,`tenants`；U `cross_device_sessions`；C `audit_log` |
+| 3.4.C | POST | `/api/v1/authentication/cross-device/sessions/{xdevId}/result` | RU `auth_challenges`,`fido_credentials`,`bound_devices`,`cross_device_sessions`；C `audit_log` |
+| 3.4.D | GET | `/api/v1/authentication/cross-device/sessions/{xdevId}/status` | RU `cross_device_sessions`；C `audit_log` |
+| 3.4.E | POST | `/api/v1/authentication/cross-device/sessions/{xdevId}/deny` | RU `cross_device_sessions`；C `audit_log` |
 | 4.1 | GET | `/api/v1/users/{externalUserId}/devices` | R `fido_user_ref`,`bound_devices`,`fido_credentials` |
 | 4.2 | DELETE | `/api/v1/users/{externalUserId}/devices/{deviceId}` | U `bound_devices`,`fido_credentials`；C `audit_log` |
 | 5.1 | GET | `/api/v1/users/{externalUserId}/fido-status` | R `fido_user_ref`,`fido_credentials` |
@@ -530,9 +726,13 @@ R=讀 C=新增 U=更新。所有查詢皆隱含以 API Key 對應租戶作 `tena
 | D10 | 裝置撤銷採軟刪除（status=REVOKED，不實體刪列） | 保留 1 年稽核 |
 | D11 | 新增 5.2 稽核事件唯讀查詢（第一版可延後實作） | 支援客服人工帳號救援後盾 |
 | D12 | Origin 綁定：`clientDataJSON.origin` 比對租戶允許清單（web origin 於 `tenants.expected_origin`、app origin 於 `tenant_app_bindings`）；不符回 `403 ORIGIN_NOT_ALLOWED`（與 `RP_ID_MISMATCH` 區分） | 對齊 origin-binding.md OB1/OB4，人類已拍板；防釣魚並支援原生 App opt-in |
-| D13 | `registration/result` / `authentication/result` 於 `audit_log.detail` 記 `originType`(`WEB`/`NATIVE_APP`) | origin-binding.md OB5，人類已拍板；事後鑑識登入來源，用既有 JSON 欄位無 schema 變更 |
+| D13 | `registration/result` / `authentication/result` / 跨裝置 `cross-device/*`（§3.4）於 `audit_log.detail` 記 `originType`(`WEB`/`NATIVE_APP`/`CROSS_DEVICE_QR`) | origin-binding.md OB5（WEB/NATIVE_APP）＋情境三新增 `CROSS_DEVICE_QR`；事後鑑識登入來源，用既有 JSON 欄位無 schema 變更 |
 | D14 | 租戶 App 授權清單 v1 不新增 REST 端點，採人工 onboarding 寫 `tenant_app_bindings` | origin-binding.md OB6，人類已拍板；中小規模人工足夠、不影響 ceremony 驗證 |
 | D15 | 明文載明「終端使用者身分驗證由呼叫端（購物網站後端）負責、伺服器只以 `X-API-Key` 驗租戶身分」；凡帶 `externalUserId` 的端點，呼叫端須確保其等於本次請求的已驗證登入使用者，否則造成 IDOR（越權列出/撤銷他人裝置、替他人加掛攻擊者裝置＝帳號接管） | 澄清既有隱含責任邊界，非新架構決策、不改端點行為；避免串接團隊忽略此步造成 IDOR。見 §1.2.1 |
+| D16 | 新增「手機 App 直連、以 `xdevId` capability 認證、不帶 X-API-Key」的呼叫方類別（§3.4 端點 B/C/E）；`xdevId` 高熵一次性、非使用者/裝置識別、不受 D7 防列舉約束 | 情境三跨裝置 QR 登入（S5，擁有者已拍板）；多租戶下手機無從得知該打哪個租戶 API Key，`xdevId` 反查租戶最乾淨。見 §1.2.2 / §3.4 |
+| D18 | 新增 §3.4 端點 E `POST .../deny`（手機直連、`xdevId` capability），把 `PENDING`/`SCANNED` 轉 `DENIED` + 寫 `audit_log`（`XDEV_DENIED`，`detail.denyReason`）。不新增錯誤碼、不改端點 D（其 DENIED 回應本已定義） | 補既有已拍板設計（設計文件 §4.2 App 放棄流程、§5.2.3 第 3 點【必要】確認畫面「不是我」拒絕出口）之落地缺口：原 A–D 四端點無任何路徑可觸發 `DENIED`，使用者取消只能被動逾時成 `EXPIRED`，流失 warn-only proximity 態勢下唯一的「使用者主動識破中繼」稽核/偵測訊號。非新架構決策，屬 S1/S2/S5 已簽核範圍內的落地。 |
+| D17 | 跨裝置 QR 登入簽發的 session JWT `amr` 多帶 `"xdev"`（＝`["fido","hwk","xdev"]`），作為下游辨識較弱路徑、對敏感操作要求 step-up 的權威依據；fido-server 只標記不強制（enforcement 落下游） | 情境三使用範圍限縮（S7，擁有者已拍板）的落地機制，本次新增；對齊 D15 責任邊界。見 §1.3 |
 | D-附 | 允許使用者撤銷至 0 個 FIDO 裝置（回退純帳密） | 對齊帳密永久保留、FIDO 為加掛選項 |
+| D-附2 | proximity（出口 IP）檢查採**警示制**（只警示不阻擋），不設 4xx 拒絕碼，改於成功回應夾帶 `proximity`/`warnings` 欄位並寫 `audit_log.detail.proximityMismatch` | 情境三 proximity 政策（S2，擁有者拍板 warn-only，與設計文件原 strict 建議不同）。見 §1.4 / §3.4 |
 
 > 複核通過後，建議將 D2/D3/D4/D5/D10 等影響架構的項目回填至 CLAUDE.md「已確認的關鍵架構決策」表，並將本合約交接 dev-engineer 進入實作。D12/D13/D14 已由人類拍板（origin-binding.md OB1/OB4/OB5/OB6），對應 `tenant_app_bindings` 表已定案於 db-schema.md 第 9 節。

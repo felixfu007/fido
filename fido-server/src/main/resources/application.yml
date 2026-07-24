@@ -87,6 +87,13 @@ fido:
     expected-origin: "https://shop.example.com"
     # 開發用固定 API Key，僅用於骨架本機測試；正式環境由 devops-engineer 建置時另行核發並移除此區塊。
     api-key: "dev-api-key-00000000000000000000"
+  cross-device:
+    # 情境三（跨裝置 QR transaction confirmation）。TTL 對齊 CLAUDE.md「Challenge 時效」S6
+    # 放寬值，僅此 ceremony type，同裝置流程仍為 60 秒（見上方 fido.challenge.ttl-seconds）。
+    ttl-seconds: 120
+    # QR 內容 https://<app-link-host>/x/<xdevId> 的網域部分（平台營運方自有、已完成 Digital
+    # Asset Links 驗證的 App Link 網域）。正式部署務必覆寫為實際網域。
+    app-link-host: "REPLACE_WITH_FIDO_APP_LINK_HOST"
 
 logging:
   level:

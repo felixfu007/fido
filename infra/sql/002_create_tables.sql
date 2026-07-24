@@ -1,7 +1,7 @@
 /*
 ==============================================================================
  002_create_tables.sql
- 建立八張核心表（DDL 依據 docs/db-schema.md 第 3-10 節「權威 schema」）
+ 建立九張核心表（DDL 依據 docs/db-schema.md 第 3-11 節「權威 schema」）
 
  建立順序依外鍵相依性排列，且此順序已可直接依序執行（後面的表只會參照前面已建立的表）：
    1. tenants
@@ -12,6 +12,9 @@
    6. audit_log            -> tenants, fido_user_ref（device_pk 依 db-schema.md DB16 不設外鍵）
    7. tenant_app_bindings  -> tenants（db-schema.md 第 9 節 / DB17：原生 App 情境的 App 授權登錄）
    8. signing_keys         -> 無外鍵（db-schema.md 第 10 節 / DB18：平台級 session JWT 簽章金鑰持久化，多實例共享）
+   9. cross_device_sessions -> tenants, auth_challenges, fido_user_ref, fido_credentials
+                                （db-schema.md 第 11 節 / DB19：情境三跨裝置 QR 登入 session，
+                                 1:1 包住一列既有 auth_challenges，故必須排在 auth_challenges 之後）
 
  PK / UNIQUE / CHECK / FK 皆內嵌於各自 CREATE TABLE 陳述式中（而非拆到獨立檔案），
  原因：SQL Server 建表當下即可宣告參照已存在資料表的外鍵，內嵌可讀性較佳、且與
@@ -19,7 +22,7 @@
  003_create_indexes.sql，該檔對應 docs/db-schema.md 每表 CREATE INDEX 陳述式。
 
  對照 docs/db-schema.md 過程中的訂正：
-   本檔內容為逐字採用該文件章節 3-8 的 DDL；經比對第 9 節「索引與外鍵總表」，
+   本檔內容為逐字採用該文件章節 3-11 的 DDL；經比對第 12 節「索引與外鍵總表」，
    欄位、PK/UNIQUE/INDEX/FK 均一致，未發現需訂正之處（詳見部署完成後的回報說明）。
 
  執行方式：對 FidoServerDb 資料庫執行（需先執行 001_create_database.sql）。
@@ -256,5 +259,48 @@ BEGIN
 END
 GO
 
-PRINT N'002_create_tables.sql 執行完成：八張核心表已建立/確認存在。';
+------------------------------------------------------------------------------
+-- 11. cross_device_sessions（情境三：跨裝置 QR transaction confirmation 登入 session，
+--     db-schema.md 第 11 節 / DB19）
+--     1:1 包住一列既有 auth_challenges（讓 assertion 密碼學驗證重用既有以 ceremony
+--     為入口的邏輯）；狀態機 PENDING→SCANNED→CONFIRMED→CONSUMED，另有 DENIED/EXPIRED；
+--     120 秒 TTL（S6，僅此 ceremony type，不動同裝置 60 秒）。proximity_mismatch 僅供
+--     稽核/查詢用（S2 警示制，不影響登入成敗），權威稽核痕跡另寫 audit_log.detail。
+--     短生命週期一次性 session，非組態/稽核資料，不適用軟刪除，清理見
+--     006_retention_cleanup_jobs.sql。
+------------------------------------------------------------------------------
+IF OBJECT_ID(N'dbo.cross_device_sessions', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.cross_device_sessions (
+        xdev_pk            BIGINT IDENTITY(1,1) NOT NULL,
+        xdev_id            NVARCHAR(64)  NOT NULL,
+        tenant_id          BIGINT        NOT NULL,
+        challenge_pk       BIGINT        NOT NULL,
+        status             NVARCHAR(20)  NOT NULL CONSTRAINT DF_xdev_status DEFAULT 'PENDING',
+        verification_code  NVARCHAR(16)  NOT NULL,
+        desktop_ip         NVARCHAR(45)  NOT NULL,
+        phone_ip           NVARCHAR(45)  NULL,
+        proximity_mismatch BIT           NULL,
+        user_ref_id        BIGINT        NULL,
+        credential_pk      BIGINT        NULL,
+        issued_jti         NVARCHAR(64)  NULL,
+        expires_at         DATETIME2(3)  NOT NULL,
+        scanned_at         DATETIME2(3)  NULL,
+        confirmed_at       DATETIME2(3)  NULL,
+        consumed_at        DATETIME2(3)  NULL,
+        created_at         DATETIME2(3)  NOT NULL CONSTRAINT DF_xdev_created DEFAULT SYSUTCDATETIME(),
+        updated_at         DATETIME2(3)  NOT NULL CONSTRAINT DF_xdev_updated DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT PK_cross_device_sessions PRIMARY KEY (xdev_pk),
+        CONSTRAINT UQ_xdev_id UNIQUE (xdev_id),
+        CONSTRAINT UQ_xdev_challenge UNIQUE (challenge_pk),
+        CONSTRAINT FK_xdev_tenant FOREIGN KEY (tenant_id) REFERENCES dbo.tenants(tenant_id),
+        CONSTRAINT FK_xdev_challenge FOREIGN KEY (challenge_pk) REFERENCES dbo.auth_challenges(challenge_pk),
+        CONSTRAINT FK_xdev_userref FOREIGN KEY (user_ref_id) REFERENCES dbo.fido_user_ref(user_ref_id),
+        CONSTRAINT FK_xdev_cred FOREIGN KEY (credential_pk) REFERENCES dbo.fido_credentials(credential_pk),
+        CONSTRAINT CK_xdev_status CHECK (status IN ('PENDING','SCANNED','CONFIRMED','CONSUMED','DENIED','EXPIRED'))
+    );
+END
+GO
+
+PRINT N'002_create_tables.sql 執行完成：九張核心表已建立/確認存在。';
 GO

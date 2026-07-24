@@ -15,6 +15,7 @@ public class FidoProperties {
     private Attestation attestation = new Attestation();
     private DevSeed devSeed = new DevSeed();
     private Persistence persistence = new Persistence();
+    private CrossDevice crossDevice = new CrossDevice();
 
     public Challenge getChallenge() {
         return challenge;
@@ -62,6 +63,14 @@ public class FidoProperties {
 
     public void setPersistence(Persistence persistence) {
         this.persistence = persistence;
+    }
+
+    public CrossDevice getCrossDevice() {
+        return crossDevice;
+    }
+
+    public void setCrossDevice(CrossDevice crossDevice) {
+        this.crossDevice = crossDevice;
     }
 
     public static class Challenge {
@@ -283,6 +292,41 @@ public class FidoProperties {
 
         public void setMode(String mode) {
             this.mode = mode;
+        }
+    }
+
+    /**
+     * 情境三（跨裝置 QR transaction confirmation）設定，見 CLAUDE.md「桌機 QR 掃碼跨裝置登入」
+     * 決策定案與 {@code docs/decisions/qr-cross-device-login-design.md}。
+     */
+    public static class CrossDevice {
+        /**
+         * xdev session / 其包住的 {@code auth_challenges} 列 TTL（秒）。CLAUDE.md「Challenge
+         * 時效 60 秒」的 S6 放寬值，**僅此 ceremony type**，同裝置流程仍為
+         * {@link Challenge#ttlSeconds} 的 60 秒預設，不受影響。
+         */
+        private int ttlSeconds = 120;
+
+        /**
+         * QR 內容 {@code https://<fido-app-link-host>/x/<xdevId>} 的網域部分（平台營運方自有、
+         * 已完成 Digital Asset Links 驗證的 App Link 網域，非租戶網域）。見設計文件 3.1 節。
+         */
+        private String appLinkHost = "REPLACE_WITH_FIDO_APP_LINK_HOST";
+
+        public int getTtlSeconds() {
+            return ttlSeconds;
+        }
+
+        public void setTtlSeconds(int ttlSeconds) {
+            this.ttlSeconds = ttlSeconds;
+        }
+
+        public String getAppLinkHost() {
+            return appLinkHost;
+        }
+
+        public void setAppLinkHost(String appLinkHost) {
+            this.appLinkHost = appLinkHost;
         }
     }
 }

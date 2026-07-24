@@ -1,9 +1,11 @@
 package com.shop.reference.exception;
 
 import com.shop.reference.authentication.jwt.JwtValidationException;
+import com.shop.reference.crossdevice.CrossDevicePollSessionNotFoundException;
 import com.shop.reference.fidoclient.FidoServerApiException;
 import com.shop.reference.session.ExternalUserIdMismatchException;
 import com.shop.reference.session.NotLoggedInException;
+import com.shop.reference.session.StepUpRequiredException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -53,6 +55,20 @@ public class ShopExceptionHandler {
         log.warn("externalUserId 與登入 session 不一致，拒絕請求（疑似 IDOR 嘗試）：{}", ex.getMessage());
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
                 .body(ShopErrorResponse.of("SHOP_SESSION", "EXTERNAL_USER_ID_MISMATCH", ex.getMessage(), Map.of()));
+    }
+
+    @ExceptionHandler(StepUpRequiredException.class)
+    public ResponseEntity<ShopErrorResponse> handleStepUpRequired(StepUpRequiredException ex) {
+        log.info("跨裝置登入 session 嘗試執行敏感操作，要求 step-up：{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(ShopErrorResponse.of("SHOP_SESSION", "STEP_UP_REQUIRED", ex.getMessage(), Map.of()));
+    }
+
+    @ExceptionHandler(CrossDevicePollSessionNotFoundException.class)
+    public ResponseEntity<ShopErrorResponse> handleCrossDevicePollSessionNotFound(CrossDevicePollSessionNotFoundException ex) {
+        log.info("跨裝置登入 poll 請求缺少有效的 XDEV_POLL cookie：{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ShopErrorResponse.of("SHOP_SESSION", "XDEV_POLL_SESSION_NOT_FOUND", ex.getMessage(), Map.of()));
     }
 
     @ExceptionHandler(JwtValidationException.class)

@@ -13,17 +13,18 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
+import java.util.List;
 
 import static com.shop.reference.testsupport.CsrfTestSupport.csrf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.cookie;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -33,8 +34,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@link FidoSessionJwtValidator#validate(String)} 通過，才會建立購物網站 session
  * （{@link ShopSessionService}）並設下 {@code SHOP_SESSION} cookie；JWT 驗證失敗則整個
  * 請求視為失敗（401），不會有任何 session 被建立。
+ *
+ * <p>{@code /result} 的收尾邏輯已抽到 {@link ShopLoginFinalizer}，這裡用
+ * {@code @Import(ShopLoginFinalizer.class)} 讓切片載入真正的 finalizer 實作（其內部依賴的
+ * {@link FidoSessionJwtValidator}/{@link ShopSessionService} 仍是本測試類別的 {@code @MockBean}），
+ * 而不是把 finalizer 本身也 mock 掉——這樣才是真正在驗證「controller + finalizer」组合起來的
+ * 行為，與跨裝置 poll 端點共用同一份邏輯的斷言基準一致（見
+ * {@code CrossDeviceAuthenticationProxyControllerTest}）。
  */
 @WebMvcTest(AuthenticationProxyController.class)
+@Import(ShopLoginFinalizer.class)
 class AuthenticationProxyControllerTest {
 
     @Autowired
@@ -69,11 +78,12 @@ class AuthenticationProxyControllerTest {
         when(fidoServerClient.authenticationResult(any())).thenReturn(fidoResponse);
 
         ValidatedFidoSession validated = new ValidatedFidoSession(
-                "u-10023", "tenant-uid-1", "cred-abc", "dev-xyz", Instant.now().getEpochSecond(), "jti-1");
+                "u-10023", "tenant-uid-1", "cred-abc", "dev-xyz", List.of("fido", "hwk"),
+                Instant.now().getEpochSecond(), "jti-1");
         when(jwtValidator.validate("header.payload.signature")).thenReturn(validated);
 
         ShopSession shopSession = new ShopSession("shopsess_1", "u-10023", "dev-xyz", "cred-abc", Instant.now());
-        when(shopSessionService.createSession("u-10023", "dev-xyz", "cred-abc")).thenReturn(shopSession);
+        when(shopSessionService.createSession("u-10023", "dev-xyz", "cred-abc", false)).thenReturn(shopSession);
 
         mockMvc.perform(post("/shop/api/fido/authentication/result")
                         .with(csrf())

@@ -57,6 +57,38 @@
             android:excludeFromRecents="true" />
 
         <!--
+            【情境三：桌機瀏覽器 QR 掃碼跨裝置登入，CLAUDE.md「非獨立 APP 跳轉」決策的
+            carve-out】由使用者掃 QR 觸發的 deep link（App Link）啟動，非系統 Credential Manager
+            PendingIntent 隱式啟動（見 CrossDeviceLoginActivity 檔頭完整說明）。
+
+            android:host 目前是佔位值（@string/cross_device_app_link_host，見該字串資源說明），
+            實際網域與對應的 assetlinks.json Digital Asset Links 由平台營運方決定並完成
+            onboarding 後才會生效（不是本次任務範圍）；CrossDeviceLoginActivity 內部的
+            CrossDeviceDeepLinkParser 不會採信/比對這個 host 值本身，只從路徑取 xdevId
+            （見該類別檔頭「設計決定」說明），故此佔位值不影響目前程式邏輯的正確性。
+
+            硬性範圍邊界（務必遵守）：本 Activity 只能經有效的、伺服器發出的 xdevId deep link
+            進入；只做「claim→確認→簽 assertion→submit」單一 ceremony；不得新增裝置列表/撤銷/
+            註冊等任何管理或並行認證 UI（那會違反「非獨立 APP 跳轉」原意）。
+        -->
+        <activity
+            android:name=".ui.CrossDeviceLoginActivity"
+            android:label="@string/cross_device_login_activity_label"
+            android:exported="true"
+            android:theme="@style/Theme.FidoCredentialProvider.Dialog"
+            android:excludeFromRecents="true">
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="@string/cross_device_app_link_host"
+                    android:pathPrefix="/x/" />
+            </intent-filter>
+        </activity>
+
+        <!--
             【CLAUDE.md「啟動器畫面決策」Option B】prod flavor 唯一帶 MAIN/LAUNCHER 的元件。
             範圍嚴格限定：顯示 provider 啟用狀態、深連結系統憑證提供者設定、版本/客服/隱私文字
             （見 SetupStatusActivity 檔頭完整說明與硬性範圍邊界）。**不得**在此加入任何登入/註冊

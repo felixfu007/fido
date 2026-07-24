@@ -194,4 +194,66 @@ class JwtServiceTest {
         byte[] decoded = java.util.Base64.getUrlDecoder().decode(headerB64);
         return new String(decoded, java.nio.charset.StandardCharsets.UTF_8);
     }
+
+    private static String decodeJwtPayload(String jwt) {
+        String payloadB64 = jwt.split("\\.")[1];
+        byte[] decoded = java.util.Base64.getUrlDecoder().decode(payloadB64);
+        return new String(decoded, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 對應跨裝置 QR 登入（情境三）D17：既有 5 參數 {@code issue(...)}（同裝置流程既有呼叫端，
+     * 見 {@code AuthenticationController} -&gt; {@code AuthenticationService.verifyResult}
+     * 2 參數版本）行為必須完全不變，仍簽出 {@code amr=["fido","hwk"]}，不受本次新增的 6 參數
+     * 多載影響。
+     */
+    @Test
+    void existingFiveArgIssueStillProducesDefaultAmrWithoutXdev() throws Exception {
+        KeyPair existingKeyPair = generateEcKeyPair();
+        SigningKey existing = toSigningKey(1L, "kid-1", existingKeyPair, SigningKeyStatus.ACTIVE);
+        SigningKeyRepository repository = mock(SigningKeyRepository.class);
+        when(repository.findActive()).thenReturn(Optional.of(existing));
+
+        JwtService jwtService = new JwtService(propertiesWithKid("2026-fido-1"), repository, new SigningKeyFactory());
+
+        JwtService.IssuedToken issued = jwtService.issue(RP_ID, "user-1", "tenant-uid-1", "cred-1", "device-1");
+        String payloadJson = decodeJwtPayload(issued.token());
+        assertThat(payloadJson).contains("\"amr\":[\"fido\",\"hwk\"]");
+        assertThat(payloadJson).doesNotContain("xdev");
+    }
+
+    /**
+     * 新增的 6 參數 {@code issue(..., extraAmr)} 多載：帶 {@code List.of("xdev")} 時，簽出的
+     * {@code amr} 應為 {@code ["fido","hwk","xdev"]}（api-contract.md §1.3 / D17）。
+     */
+    @Test
+    void sixArgIssueWithExtraAmrAppendsXdev() throws Exception {
+        KeyPair existingKeyPair = generateEcKeyPair();
+        SigningKey existing = toSigningKey(1L, "kid-1", existingKeyPair, SigningKeyStatus.ACTIVE);
+        SigningKeyRepository repository = mock(SigningKeyRepository.class);
+        when(repository.findActive()).thenReturn(Optional.of(existing));
+
+        JwtService jwtService = new JwtService(propertiesWithKid("2026-fido-1"), repository, new SigningKeyFactory());
+
+        JwtService.IssuedToken issued = jwtService.issue(
+                RP_ID, "user-1", "tenant-uid-1", "cred-1", "device-1", List.of("xdev"));
+        String payloadJson = decodeJwtPayload(issued.token());
+        assertThat(payloadJson).contains("\"amr\":[\"fido\",\"hwk\",\"xdev\"]");
+    }
+
+    /** 6 參數多載傳入空清單時，行為應與 5 參數版本等價（不多帶任何值）。 */
+    @Test
+    void sixArgIssueWithEmptyExtraAmrMatchesDefaultBehavior() throws Exception {
+        KeyPair existingKeyPair = generateEcKeyPair();
+        SigningKey existing = toSigningKey(1L, "kid-1", existingKeyPair, SigningKeyStatus.ACTIVE);
+        SigningKeyRepository repository = mock(SigningKeyRepository.class);
+        when(repository.findActive()).thenReturn(Optional.of(existing));
+
+        JwtService jwtService = new JwtService(propertiesWithKid("2026-fido-1"), repository, new SigningKeyFactory());
+
+        JwtService.IssuedToken issued = jwtService.issue(
+                RP_ID, "user-1", "tenant-uid-1", "cred-1", "device-1", List.of());
+        String payloadJson = decodeJwtPayload(issued.token());
+        assertThat(payloadJson).contains("\"amr\":[\"fido\",\"hwk\"]");
+    }
 }

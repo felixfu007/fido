@@ -1,8 +1,8 @@
 # WebAuthn Origin 綁定架構 — 瀏覽器 vs 原生 App
 
-- 版本：v2（OB1–OB6 已由人類拍板定案）
-- 最後更新：2026-07-22
-- 適用架構情境：A（標準 WebAuthn，同裝置）
+- 版本：v3（OB1–OB6 已定案；OB7 為情境三 cross-device origin 信任模型，隨情境三拍板新增）
+- 最後更新：2026-07-24
+- 適用架構情境：A（標準 WebAuthn，同裝置）；OB7 另涵蓋情境三（跨裝置 QR transaction confirmation）
 - 對齊文件：`d:\fido\CLAUDE.md`、`d:\fido\docs\api-contract.md`、`d:\fido\docs\db-schema.md`、`d:\fido\docs\android-poc-checklist.md`
 - 讀者：dev-engineer（provider / server 實作）、devops-engineer（租戶 onboarding、schema）、qa-engineer
 - 觸發來源：Android Credential Provider PoC 收尾時發現的開放問題（見 CLAUDE.md「目前階段」、`PocConfig.kt` Javadoc）
@@ -22,7 +22,7 @@
 5. [情境二：購物網站原生 App 直呼 Credential Manager（Digital Asset Links）](#5-情境二購物網站原生-app-直呼-credential-managerdigital-asset-links)
 6. [`FidoCredentialProviderService` 端的 origin 判定邏輯](#6-fidocredentialproviderservice-端的-origin-判定邏輯)
 7. [與 `api-contract.md` / 資料模型的關聯與建議改動](#7-與-api-contractmd--資料模型的關聯與建議改動)
-8. [補充決策定案清單（OB1–OB6）](#8-補充決策定案清單ob1ob6)
+8. [補充決策定案清單（OB1–OB7）](#8-補充決策定案清單ob1ob7)
 9. [交接與後續行動](#9-交接與後續行動)
 
 ---
@@ -280,9 +280,9 @@ provider 端應在以下情況直接拒絕（回 `CreateCredentialUnknownExcepti
 
 ---
 
-## 8. 補充決策定案清單（OB1–OB6）
+## 8. 補充決策定案清單（OB1–OB7）
 
-> 六項均已於 2026-07-22 由人類拍板。下表為**最終定案**（非提案）。已回填的文件見「回填狀態」欄。
+> OB1–OB6 均已於 2026-07-22 由人類拍板；**OB7 於 2026-07-24 隨情境三（跨裝置 QR transaction confirmation）拍板新增**。下表為**最終定案**（非提案）。已回填的文件見「回填狀態」欄。OB7 詳述見 [第 8.1 節](#81-ob7-詳述cross-device-origin-信任模型)。
 
 | 編號 | 定案內容 | 理由 | 回填狀態 |
 |---|---|---|---|
@@ -292,6 +292,17 @@ provider 端應在以下情況直接拒絕（回 `CreateCredentialUnknownExcepti
 | **OB4** | 新增 `403 ORIGIN_NOT_ALLOWED`，與 `RP_ID_MISMATCH` 區分。 | 便於購物網站分辨錯因。 | api-contract.md §1.4 / §2.2 / §3.2 / D12 |
 | **OB5** | `registration/result` / `authentication/result` 於 `audit_log.detail` 記 `originType`(WEB/NATIVE_APP)。 | 事後鑑識登入來源；用既有 JSON 欄位、無 schema 變更。 | api-contract.md §2.2 / §3.2 核心表對應 / D13 |
 | **OB6** | 租戶登錄/輪替 App 指紋 v1 採**人工 onboarding**，不納入 REST 合約。 | 中小規模、原生 App 租戶初期少，人工足夠。 | api-contract.md §5.3 / D14 |
+| **OB7** | 情境三（cross-device QR）的 origin 由**伺服器依不透明 `xdevId` 權威給定**，App 與 QR 都不得自行宣稱；此情境**沒有瀏覽器/OS 擔保 origin 那一層**，origin 欄位退化為**租戶識別**、不再帶「使用者確實在該網域」的防釣魚語意；防釣魚改由 proximity（警示制，S2）＋手機確認畫面＋範圍限縮（S7）承擔。殘餘風險已由擁有者簽核（S1）。 | cross-device 手機沒看到桌機在哪個網域，只能照伺服器（依 `xdevId`）給的 rpId 簽；維持「origin 動態、經伺服器驗證取得、不由呼叫方宣稱」的既有原則，只是擔保來源從「OS/瀏覽器」換成「`xdevId`→租戶」的伺服器綁定。 | CLAUDE.md 情境三敘述 + 決策表；api-contract.md §3.4；db-schema.md 第 11 節；`docs/decisions/qr-cross-device-login-design.md` 5.1 |
+
+### 8.1 OB7 詳述（cross-device origin 信任模型）
+
+抄整自 `docs/decisions/qr-cross-device-login-design.md` 5.1，整理成 OB 條列：
+
+1. **QR 只帶不透明 `xdevId`**：不放 rpId、challenge 或任何使用者資訊。QR 若夾帶 origin/rpId 等於讓 QR 自行宣稱來源——正是本文件第 1 節禁止的「呼叫方自行宣稱 origin」。
+2. **origin 由伺服器用 `xdevId` 反查權威給定**：App claim（api-contract §3.4 端點 B）時，伺服器由 `xdevId → cross_device_sessions.tenant_id → tenants.rp_id / expected_origin` 反查，把該 session 真正對應的 `rpId` 與要簽的 `origin` 字串回給 App，App 照簽 `clientDataJSON.origin`。App **不自行拼字串、不自行宣稱**。
+3. **伺服器仍是最終權威**：result（端點 C）端沿用既有 `OriginValidator` 把 `clientDataJSON.origin` 比對該租戶允許清單（此情境恆為伺服器自己給的值，必過）。origin 驗證路徑與同裝置一致，只是 origin 的**來源擔保層**不同。
+4. **必須誠實點出的安全落差（S1，已簽核）**：標準 WebAuthn 的 origin 能防釣魚，是因為**瀏覽器保證使用者當下真的在該網域**。cross-device 情境裡簽 origin 的手機**根本沒看到桌機在哪個網域**，只是照 `xdevId` 對應的 rpId 簽——故 origin 欄位在此**退化為租戶識別、不再帶防釣魚語意**。防釣魚責任整個轉移到 proximity（S2 警示制）＋手機確認畫面＋使用範圍限縮（S7，經 session JWT `amr` 帶 `"xdev"` 讓下游對敏感操作 step-up），而非 origin 本身。
+5. **`OriginResolver` 的瀏覽器 allowlist / apk-key-hash 路徑在此情境不適用**：cross-device 的 `CrossDeviceLoginActivity` 由 deep link 喚起、無 `CallingAppInfo`，origin 不來自呼叫方解析，而來自伺服器回傳（見 `docs/decisions/qr-cross-device-login-design.md` 4.2/4.3）。
 
 ---
 
