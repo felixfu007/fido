@@ -52,11 +52,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 對 {@link CrossDeviceLoginService} 的狀態機/proximity/token 暫存邏輯做 Mockito 單元測試
+ * 對 {@link CrossDeviceLoginService} 的狀態機/proximity/JWT 守衛式領取邏輯做 Mockito 單元測試
  * （比照 {@code JwtServiceTest} 的純 mock 風格）。端對端（真實 HTTP + 真實密碼學簽章）happy
  * path 見 {@link CrossDeviceLoginFlowTest}；本類別聚焦這裡更方便構造的邊界情況（session 逾時、
- * 狀態機非法轉移、跨租戶隔離、token 暫存單機限制），這些若只靠 HTTP 端對端測試會需要真的等待
- * 120 秒或另外注入 Clock 抽象，不划算。
+ * 狀態機非法轉移、跨租戶隔離、{@code consumeConfirmedJwt} 守衛式 UPDATE 搶輸的情境），這些若只靠
+ * HTTP 端對端測試會需要真的等待 120 秒或另外注入 Clock 抽象，不划算。真實資料庫併發（多執行緒
+ * 對同一 xdevId 搶 consumeConfirmedJwt）見 {@code JpaPersistenceH2FlowTest}。
  */
 class CrossDeviceLoginServiceTest {
 
@@ -261,6 +262,9 @@ class CrossDeviceLoginServiceTest {
         assertThat(session.getUserRefId()).isEqualTo(55L);
         assertThat(session.getCredentialPk()).isEqualTo(99L);
         assertThat(session.getIssuedJti()).isEqualTo("jti_test123");
+        // DB20：完整 JWT 應持久化到 session.issuedJwt，供端點 D 以守衛式 UPDATE 領取
+        // （取代原單機記憶體 pendingTokens Map）。
+        assertThat(session.getIssuedJwt()).isNotBlank();
 
         verify(auditService).record(eq(1L), eq(55L), eq(77L), eq("XDEV_CONFIRMED"), any(), anyMap());
     }
@@ -342,12 +346,14 @@ class CrossDeviceLoginServiceTest {
     }
 
     @Test
-    void pollStatusConfirmedWithoutStashedTokenThrowsInvalidState() {
-        // CONFIRMED 但本 service 實例的記憶體 pendingTokens 從未存過這個 xdevId 的 token
-        // （模擬多實例情境下 poll 落在跟 confirm 不同節點的已知限制）。
+    void pollStatusConfirmedButGuardedConsumeLosesRaceThrowsInvalidState() {
+        // CONFIRMED，但資料庫層的守衛式 UPDATE（consumeConfirmedJwt）回報「這次呼叫沒搶到」
+        // （模擬同一 xdevId 被另一併發輪詢，或多實例部署下的另一個 pod，搶先領走的情境；DB20）。
         CrossDeviceSession session = pendingSession("xdev1", Instant.now().plusSeconds(100));
         session.setStatus(CrossDeviceSessionStatus.CONFIRMED);
         when(crossDeviceSessionRepository.findByXdevId("xdev1")).thenReturn(Optional.of(session));
+        when(crossDeviceSessionRepository.consumeConfirmedJwt(eq("xdev1"), any(Instant.class)))
+                .thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.pollStatus(tenant, "xdev1"))
                 .isInstanceOf(ApiException.class)
@@ -366,16 +372,31 @@ class CrossDeviceLoginServiceTest {
         // 的同一個 session 物件（模擬 repository 對同一列的後續查詢）。
         when(crossDeviceSessionRepository.findByXdevId("xdev1")).thenReturn(Optional.of(session));
 
+        // 模擬 CrossDeviceSessionRepository#consumeConfirmedJwt 的守衛式 UPDATE 語意：只有目前
+        // 仍是 CONFIRMED 才「成功領取一次」（回傳 JWT 並清空/轉 CONSUMED），第二次呼叫（狀態已是
+        // CONSUMED）回 empty。
+        when(crossDeviceSessionRepository.consumeConfirmedJwt(eq("xdev1"), any(Instant.class)))
+                .thenAnswer(invocation -> {
+                    if (session.getStatus() != CrossDeviceSessionStatus.CONFIRMED) {
+                        return Optional.empty();
+                    }
+                    String jwt = session.getIssuedJwt();
+                    session.setStatus(CrossDeviceSessionStatus.CONSUMED);
+                    session.setIssuedJwt(null);
+                    return Optional.ofNullable(jwt);
+                });
+
         CrossDeviceStatusResponse first = service.pollStatus(tenant, "xdev1");
         assertThat(first.status()).isEqualTo("CONFIRMED");
         assertThat(first.session().token()).isNotBlank();
         assertThat(first.session().tokenType()).isEqualTo("Bearer");
         assertThat(first.warnings().proximityMismatch()).isFalse();
         assertThat(session.getStatus()).isEqualTo(CrossDeviceSessionStatus.CONSUMED);
+        assertThat(session.getIssuedJwt()).isNull();
 
         verify(auditService).record(eq(1L), eq(55L), isNull(), eq("XDEV_CONSUMED"), any(), anyMap());
 
-        // 第二次輪詢：session 現在是 CONSUMED -> 409，且 token 已從記憶體移除、不能再領第二次。
+        // 第二次輪詢：session 現在是 CONSUMED -> 409，且 JWT 已被清空、不能再領第二次。
         assertThatThrownBy(() -> service.pollStatus(tenant, "xdev1"))
                 .isInstanceOf(ApiException.class)
                 .extracting(e -> ((ApiException) e).getErrorCode())

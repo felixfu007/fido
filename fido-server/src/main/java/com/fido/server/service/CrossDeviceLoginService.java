@@ -39,8 +39,8 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 對應 api-contract.md §3.4：跨裝置 QR 登入（情境三）五個端點（A-E）的業務邏輯。
@@ -50,15 +50,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * （challenge/origin/rpIdHash/UV/簽章/sign counter，含自動撤銷），本類別只在其外層加狀態機
  * 轉移與 proximity 警示檢查，並多帶 {@code "xdev"} amr 標記（D17）。
  *
- * <p><b>已簽發 session JWT 的暫存機制（實作細節，非 db-schema.md 明訂）</b>：
- * {@code cross_device_sessions} 表（db-schema.md 第 11 節）只定義 {@code issued_jti}
- * （供稽核/防重領比對），並未定義持久化整枚 JWT 字串的欄位。本類別因此把端點 C 簽發、待端點 D
- * 領取的完整 JWT 暫存於一個單機記憶體 {@link Map}（{@link #pendingTokens}），而非資料庫—— 這是
- * 刻意縮小曝險面的設計（短生命週期 bearer token 不落地資料庫，只短暫存活在記憶體，被單一
- * {@code GET .../status} 呼叫領走一次即清除）。**已知限制**：多實例水平部署時，若端點 D 的請求
- * 被負載平衡器分配到與端點 C 不同的節點，會找不到暫存的 token（見 {@link #pollStatus} 內對應
- * {@link ApiException}），比照 {@link RateLimitService} 既有「單機實作、多節點需另行處理」的
- * 前例，屬已知且非本次任務範圍的水平擴展限制。
+ * <p><b>已簽發 session JWT 的持久化（db-schema.md 第 11 節 DB20）</b>：{@code cross_device_sessions}
+ * 表的 {@code issued_jwt} 欄位持久化端點 C 簽發、待端點 D 領取的完整 JWT 字串，取代原先版本的
+ * 單機記憶體 {@code Map}——原設計在 {@code fido-server} 容器化、以多 pod 動態調節水平部署時，
+ * 若端點 C/D 落在不同 pod 會找不到暫存的 token（功能性中斷）。端點 D 領取時以
+ * {@link com.fido.server.repository.CrossDeviceSessionRepository#consumeConfirmedJwt} 做
+ * 「守衛式（guarded）條件 UPDATE」：僅當目前仍為 {@code CONFIRMED} 才原子轉為 {@code CONSUMED}
+ * 並清空 {@code issued_jwt}，藉此在資料庫層重建原本 {@code Map.remove()} 天然具備的
+ * 「同一 xdevId 併發下至多一次成功領取」原子性保證，同時涵蓋多實例（不同 pod 對同一資料庫）與
+ * 單實例多執行緒併發輪詢兩種情境。
  */
 @Service
 public class CrossDeviceLoginService {
@@ -80,8 +80,6 @@ public class CrossDeviceLoginService {
     private final BoundDeviceRepository boundDeviceRepository;
     private final AuditService auditService;
     private final ObjectMapper objectMapper;
-
-    private final Map<String, JwtService.IssuedToken> pendingTokens = new ConcurrentHashMap<>();
 
     public CrossDeviceLoginService(FidoProperties properties,
                                     ChallengeService challengeService,
@@ -206,11 +204,12 @@ public class CrossDeviceLoginService {
         session.setUserRefId(userRefId);
         session.setCredentialPk(credentialPk);
         session.setIssuedJti(issuedJti);
+        // DB20：完整 JWT 持久化到 issued_jwt，供端點 D 以守衛式 UPDATE 領取（取代原單機記憶體
+        // pendingTokens Map），同一次更新內轉移到 CONFIRMED，讓多實例/容器水平部署下端點 C/D
+        // 落在不同 pod 也能領取。
+        session.setIssuedJwt(token);
         session.setUpdatedAt(now);
         crossDeviceSessionRepository.save(session);
-
-        pendingTokens.put(xdevId,
-                new JwtService.IssuedToken(token, result.session().expiresIn(), issuedJti));
 
         Map<String, Object> detail = new LinkedHashMap<>();
         detail.put("originType", ORIGIN_TYPE_CROSS_DEVICE_QR);
@@ -249,25 +248,32 @@ public class CrossDeviceLoginService {
         };
     }
 
+    /**
+     * DB20 守衛式領取：{@code consumeConfirmedJwt} 只有在資料庫層以條件式 UPDATE
+     * （{@code WHERE xdev_id=? AND status='CONFIRMED'}）真正成功轉移狀態時，才回傳非 empty 的
+     * JWT；empty 表示已被另一併發輪詢（同實例另一執行緒，或多實例部署下的另一個 pod）搶先領走，
+     * 對外行為與先前記憶體 Map 版本一致，仍回 409 {@code XDEV_SESSION_INVALID_STATE}。
+     */
     private CrossDeviceStatusResponse consumeConfirmedSession(CrossDeviceSession session, String xdevId) {
-        JwtService.IssuedToken issued = pendingTokens.remove(xdevId);
-        if (issued == null) {
+        Instant now = Instant.now();
+        Optional<String> issuedJwt = crossDeviceSessionRepository.consumeConfirmedJwt(xdevId, now);
+        if (issuedJwt.isEmpty()) {
             throw new ApiException(ErrorCode.XDEV_SESSION_INVALID_STATE,
-                    "Cross-device session is CONFIRMED but its issued token is no longer available on this "
-                            + "server instance (known single-instance in-memory holder limitation).");
+                    "Cross-device session result has already been consumed by a concurrent request "
+                            + "(or is no longer in CONFIRMED state).");
         }
 
-        Instant now = Instant.now();
         session.setStatus(CrossDeviceSessionStatus.CONSUMED);
         session.setConsumedAt(now);
+        session.setIssuedJwt(null);
         session.setUpdatedAt(now);
-        crossDeviceSessionRepository.save(session);
 
         auditService.record(session.getTenantId(), session.getUserRefId(), null, "XDEV_CONSUMED",
                 AuditOutcome.SUCCESS, Map.of("originType", ORIGIN_TYPE_CROSS_DEVICE_QR));
 
         return new CrossDeviceStatusResponse("CONFIRMED",
-                new CrossDeviceStatusResponse.SessionInfo(issued.token(), "Bearer", issued.expiresIn()),
+                new CrossDeviceStatusResponse.SessionInfo(issuedJwt.get(), "Bearer",
+                        properties.getSessionJwt().getTtlSeconds()),
                 new CrossDeviceStatusResponse.Warnings(session.getProximityMismatch()));
     }
 

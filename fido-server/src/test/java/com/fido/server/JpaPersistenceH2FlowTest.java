@@ -6,6 +6,7 @@ import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import com.fido.server.domain.AuditLog;
 import com.fido.server.domain.AuthChallenge;
 import com.fido.server.domain.BoundDevice;
+import com.fido.server.domain.CrossDeviceSession;
 import com.fido.server.domain.FidoCredential;
 import com.fido.server.domain.FidoUserRef;
 import com.fido.server.domain.SigningKey;
@@ -15,6 +16,7 @@ import com.fido.server.domain.enums.AppBindingRevokedReason;
 import com.fido.server.domain.enums.AuditOutcome;
 import com.fido.server.domain.enums.CeremonyType;
 import com.fido.server.domain.enums.ChallengeStatus;
+import com.fido.server.domain.enums.CrossDeviceSessionStatus;
 import com.fido.server.domain.enums.RecordStatus;
 import com.fido.server.domain.enums.RevokedReason;
 import com.fido.server.domain.enums.SecurityLevel;
@@ -30,6 +32,7 @@ import com.fido.server.repository.TenantRepository;
 import com.fido.server.repository.jpa.JpaAuditLogRepository;
 import com.fido.server.repository.jpa.JpaAuthChallengeRepository;
 import com.fido.server.repository.jpa.JpaBoundDeviceRepository;
+import com.fido.server.repository.jpa.JpaCrossDeviceSessionRepository;
 import com.fido.server.repository.jpa.JpaFidoCredentialRepository;
 import com.fido.server.repository.jpa.JpaFidoUserRefRepository;
 import com.fido.server.repository.jpa.JpaSigningKeyRepository;
@@ -53,10 +56,17 @@ import java.security.cert.X509Certificate;
 import java.security.interfaces.ECPublicKey;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -123,6 +133,9 @@ class JpaPersistenceH2FlowTest {
 
     @Autowired
     private JpaSigningKeyRepository jpaSigningKeyRepository;
+
+    @Autowired
+    private JpaCrossDeviceSessionRepository jpaCrossDeviceSessionRepository;
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final ObjectMapper cborMapper = new ObjectMapper(new CBORFactory());
@@ -572,6 +585,103 @@ class JpaPersistenceH2FlowTest {
                 .filteredOn(k -> bootstrappedKid.equals(k.getKid()))
                 .extracting(SigningKey::getStatus)
                 .containsExactly(SigningKeyStatus.RETIRED);
+    }
+
+    /**
+     * 第九張表 {@code cross_device_sessions} 的 {@code issued_jwt} 一次性領取（db-schema.md
+     * 第 11 節 DB20 / CLAUDE.md「守衛式條件 UPDATE」）：對真實 H2 資料庫（非 mock）以多執行緒同時
+     * 呼叫 {@link JpaCrossDeviceSessionRepository#consumeConfirmedJwt} 領取同一個 {@code CONFIRMED}
+     * 狀態的 session 列，證明「同一 xdevId 併發下至多一次成功領取」的一次性保證在真實併發寫入下
+     * 成立——比照先前 qa-engineer 對 {@code signing_keys} 併發 INSERT 補的真實 H2 併發測試精神，
+     * 不只信任 mock 假裝驗證過。
+     *
+     * <p>先直接（繞過 {@code CrossDeviceLoginService}）用 JPA repository 落一列已是
+     * {@code CONFIRMED}、帶有 {@code issued_jwt} 的 session（模擬端點 C 剛完成的狀態），再讓
+     * {@code threadCount} 條執行緒在同一個 {@link CountDownLatch} 釋放後同時搶著呼叫
+     * {@code consumeConfirmedJwt}。預期恰好 1 個執行緒拿到非 empty 的 JWT，其餘全部拿到
+     * {@link Optional#empty()}（對應 service 層的 409 {@code XDEV_SESSION_INVALID_STATE}），
+     * 且資料庫最終狀態真的落地成 {@code CONSUMED}、{@code issued_jwt} 清空為 NULL。
+     */
+    @Test
+    void consumeConfirmedJwtIsAtomicUnderRealConcurrentH2Writes() throws Exception {
+        Tenant tenant = new Tenant();
+        tenant.setName("XDev Concurrency Shop");
+        tenant.setRpId("xdev-concurrency-" + UUID.randomUUID() + ".example.com");
+        tenant.setExpectedOrigin("[\"https://xdev-concurrency.example.com\"]");
+        tenant.setApiKeyHash(WebAuthnCeremonyFixtures.randomBytes(32));
+        tenant.setApiKeyPrefix("xc_prefix1");
+        tenant.setStatus(TenantStatus.ACTIVE);
+        tenant.setRateLimitTps(100);
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        tenant.setCreatedAt(now);
+        tenant.setUpdatedAt(now);
+        Tenant savedTenant = jpaTenantRepository.save(tenant);
+
+        AuthChallenge challenge = new AuthChallenge();
+        challenge.setCeremonyId("auth_xdev_concurrency_" + UUID.randomUUID());
+        challenge.setTenantId(savedTenant.getTenantId());
+        challenge.setUserRefId(null);
+        challenge.setChallenge(WebAuthnCeremonyFixtures.randomBytes(32));
+        challenge.setCeremonyType(CeremonyType.AUTHENTICATION);
+        challenge.setStatus(ChallengeStatus.PENDING);
+        challenge.setExpiresAt(now.plusSeconds(120));
+        challenge.setCreatedAt(now);
+        AuthChallenge savedChallenge = jpaAuthChallengeRepository.save(challenge);
+
+        String xdevId = "xdev-concurrency-" + UUID.randomUUID();
+        CrossDeviceSession session = new CrossDeviceSession();
+        session.setXdevId(xdevId);
+        session.setTenantId(savedTenant.getTenantId());
+        session.setChallengePk(savedChallenge.getChallengePk());
+        session.setStatus(CrossDeviceSessionStatus.CONFIRMED);
+        session.setVerificationCode("12-345");
+        session.setDesktopIp("203.0.113.5");
+        session.setPhoneIp("203.0.113.5");
+        session.setProximityMismatch(false);
+        session.setIssuedJti("jti_concurrency_test");
+        session.setIssuedJwt("fake.jwt.for-concurrency-test");
+        session.setExpiresAt(now.plusSeconds(120));
+        session.setConfirmedAt(now);
+        session.setCreatedAt(now);
+        session.setUpdatedAt(now);
+        jpaCrossDeviceSessionRepository.save(session);
+
+        int threadCount = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        List<Future<Optional<String>>> futures = new ArrayList<>();
+        try {
+            for (int i = 0; i < threadCount; i++) {
+                futures.add(executor.submit(() -> {
+                    startLatch.await();
+                    return jpaCrossDeviceSessionRepository.consumeConfirmedJwt(xdevId, Instant.now());
+                }));
+            }
+            startLatch.countDown();
+
+            int successCount = 0;
+            int conflictCount = 0;
+            for (Future<Optional<String>> future : futures) {
+                Optional<String> result = future.get(10, TimeUnit.SECONDS);
+                if (result.isPresent()) {
+                    successCount++;
+                    assertThat(result.get()).isEqualTo("fake.jwt.for-concurrency-test");
+                } else {
+                    conflictCount++;
+                }
+            }
+
+            assertThat(successCount).isEqualTo(1);
+            assertThat(conflictCount).isEqualTo(threadCount - 1);
+        } finally {
+            executor.shutdown();
+        }
+
+        // 資料庫真的落地成 CONSUMED、issued_jwt 清空——不是只有回傳值看起來對，底層卻沒真的寫入。
+        Optional<CrossDeviceSession> reloaded = jpaCrossDeviceSessionRepository.findByXdevId(xdevId);
+        assertThat(reloaded).isPresent();
+        assertThat(reloaded.get().getStatus()).isEqualTo(CrossDeviceSessionStatus.CONSUMED);
+        assertThat(reloaded.get().getIssuedJwt()).isNull();
     }
 
     private void submitAssertion(byte[] credentialId, PrivateKey credentialPrivateKey, String ceremonyId,

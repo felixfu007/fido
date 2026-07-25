@@ -248,6 +248,7 @@ CREATE TABLE cross_device_sessions (
     user_ref_id        BIGINT        NULL,
     credential_pk      BIGINT        NULL,
     issued_jti         NVARCHAR(64)  NULL,
+    issued_jwt         NVARCHAR(4000) NULL,
     expires_at         DATETIME2(3)  NOT NULL,
     scanned_at         DATETIME2(3)  NULL,
     confirmed_at       DATETIME2(3)  NULL,

@@ -60,6 +60,9 @@ public class CrossDeviceSessionEntity {
     @Column(name = "issued_jti", length = 64)
     private String issuedJti;
 
+    @Column(name = "issued_jwt", length = 4000)
+    private String issuedJwt;
+
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
 
@@ -172,6 +175,14 @@ public class CrossDeviceSessionEntity {
 
     public void setIssuedJti(String issuedJti) {
         this.issuedJti = issuedJti;
+    }
+
+    public String getIssuedJwt() {
+        return issuedJwt;
+    }
+
+    public void setIssuedJwt(String issuedJwt) {
+        this.issuedJwt = issuedJwt;
     }
 
     public Instant getExpiresAt() {

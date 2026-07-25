@@ -488,7 +488,7 @@ CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE sta
 
 情境三（跨裝置 QR transaction confirmation）的登入 session。一次「桌機發起、手機確認」的登入嘗試，以不透明高熵 `xdev_id` 識別，有自己的狀態機與 120 秒 TTL，`1:1` 包住一列既有 `auth_challenges`（讓 assertion 密碼學驗證重用既有以 ceremony 為入口的邏輯）。對應 `docs/api-contract.md` §3.4；完整設計見 `docs/decisions/qr-cross-device-login-design.md`。
 
-> **為何用新表而非塞進 `auth_challenges`（DB19）**：`auth_challenges` 是「一次性 challenge」的精簡表，只有 PENDING/CONSUMED/EXPIRED、無雙方 IP、無確認碼、TTL 慣例 60 秒。cross-device 需要多態狀態機（PENDING→SCANNED→CONFIRMED→CONSUMED，另有 DENIED/EXPIRED）、桌機/手機兩個 IP、確認碼、暫存簽發的 jti、120 秒 TTL。新表包住既有 challenge 列（1:1 外鍵），既隔離新概念、又讓密碼學驗證能重用既有程式碼路徑；硬塞進 `auth_challenges` 會污染同裝置流程語意。
+> **為何用新表而非塞進 `auth_challenges`（DB19）**：`auth_challenges` 是「一次性 challenge」的精簡表，只有 PENDING/CONSUMED/EXPIRED、無雙方 IP、無確認碼、TTL 慣例 60 秒。cross-device 需要多態狀態機（PENDING→SCANNED→CONFIRMED→CONSUMED，另有 DENIED/EXPIRED）、桌機/手機兩個 IP、確認碼、暫存簽發的 jti 與待桌機領取的完整 JWT（`issued_jwt`，DB20）、120 秒 TTL。新表包住既有 challenge 列（1:1 外鍵），既隔離新概念、又讓密碼學驗證能重用既有程式碼路徑；硬塞進 `auth_challenges` 會污染同裝置流程語意。
 
 | 欄位 | 型別 | Null | 預設 | 說明 |
 |---|---|---|---|---|
@@ -503,7 +503,8 @@ CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE sta
 | `proximity_mismatch` | BIT | 是 | | **【DB19】** proximity 檢查結果（`desktop_ip` vs `phone_ip` 出口是否不一致）；result 時計算寫入。S2 為警示制：此值僅供稽核/查詢，**不影響登入是否成功**。權威稽核痕跡另寫 `audit_log.detail.proximityMismatch`（本表短生命週期會被清理，非長期稽核來源） |
 | `user_ref_id` | BIGINT | 是 | | FK → fido_user_ref；確認成功後由 credential 反查填入 |
 | `credential_pk` | BIGINT | 是 | | FK → fido_credentials；本次使用的憑證 |
-| `issued_jti` | NVARCHAR(64) | 是 | | 簽發 session JWT 的 jti（防重領/稽核） |
+| `issued_jti` | NVARCHAR(64) | 是 | | 簽發 session JWT 的 jti（防重領/稽核；保留供不解 JWT 即可查 jti） |
+| `issued_jwt` | NVARCHAR(4000) | 是 | | **【DB20】** 端點 C 簽發、待端點 D（桌機輪詢）領取的**完整 session JWT 文字**（compact JWS）。取代原單機記憶體暫存（`CrossDeviceLoginService.pendingTokens`），使多實例/容器水平部署下端點 C 與端點 D 落在不同 pod 也能領取。屬短生命週期一次性 bearer：僅 `CONFIRMED` 態有值；端點 D 領取並轉 `CONSUMED` 時**一併清為 NULL**（最小化 bearer token at-rest 窗口，jti 仍留供稽核）。由 TDE 保護、120 秒 TTL 後由清理排程刪列。長度 4000 見下方 DB20 估算 |
 | `expires_at` | DATETIME2(3) | 否 | | = created_at + 120 秒（S6，伺服器端權威時效） |
 | `scanned_at` | DATETIME2(3) | 是 | | 轉 SCANNED 時間 |
 | `confirmed_at` | DATETIME2(3) | 是 | | 轉 CONFIRMED 時間 |
@@ -515,9 +516,11 @@ CREATE UNIQUE INDEX UX_signkey_one_active ON dbo.signing_keys (status) WHERE sta
 
 **時效/狀態落地**：TTL 120 秒（僅此 ceremony type，不動同裝置 60 秒，見 CLAUDE.md「Challenge 時效」）。狀態機單向：claim 只在 `PENDING` 成功（→SCANNED）、result 只在 `SCANNED` 成功（→CONFIRMED）、status 取 JWT 只在 `CONFIRMED` 成功且立即轉 `CONSUMED`（JWT 只能被領一次）。違反回 `409 XDEV_SESSION_INVALID_STATE`；逾期回 `400 XDEV_SESSION_EXPIRED`；查無 `xdev_id` 回 `404 XDEV_SESSION_NOT_FOUND`。
 
+**端點 D 領取 JWT 的一次性保證（DB20，多實例正確性關鍵）**：原單機記憶體 `Map` 以 `remove()` 天然取得「只有一個呼叫拿到 token」的原子性；改用資料庫 `issued_jwt` 後，此原子性**必須以條件式（守衛）UPDATE 顯式重建**，不可先讀出再無條件寫回。dev-engineer 實作端點 D 的 CONFIRMED→CONSUMED 轉移時，須以「僅當目前仍為 `CONFIRMED` 才轉」的守衛更新達成，例如：`UPDATE cross_device_sessions SET status='CONSUMED', consumed_at=SYSUTCDATETIME(), issued_jwt=NULL, updated_at=SYSUTCDATETIME() WHERE xdev_pk=? AND status='CONFIRMED'`，並檢查受影響列數：**恰為 1 才回傳先前讀到的 JWT**；為 0 表示已被另一併發輪詢（或多實例的另一 pod）搶先領走 → 回 `409 XDEV_SESSION_INVALID_STATE`（等同「已 CONSUMED」語意）。等價作法為 JPA `@Version` 樂觀鎖或 `SELECT ... FOR UPDATE` 行鎖；擇一即可，重點是「讀 JWT + 轉 CONSUMED」對同一 `xdev_id` 併發下**至多一個成功**。此舉同時涵蓋多實例（端點 C 在 pod-1 寫 `issued_jwt`、端點 D 在 pod-2 讀，因同一資料庫故可見）與單實例多執行緒併發輪詢兩種情境。
+
 **軟刪除不適用**：短生命週期一次性 session，非組態資料；到期/用畢由清理排程處理（見第 13 節），稽核事件另寫 `audit_log`。
 
-**API 對應**：端點 A（insert PENDING）、B（→SCANNED，回權威 rpId/challenge）、C（→CONFIRMED，重用 `AuthenticationService.verifyResult`+proximity 警示）、D（CONFIRMED 回 JWT 並→CONSUMED）。見 api-contract §3.4。
+**API 對應**：端點 A（insert PENDING）、B（→SCANNED，回權威 rpId/challenge）、C（→CONFIRMED，重用 `AuthenticationService.verifyResult`+proximity 警示，寫 `issued_jti`+`issued_jwt`）、D（CONFIRMED 以守衛 UPDATE 領 `issued_jwt` 並→CONSUMED、清 `issued_jwt`=NULL）、E（`.../deny`，PENDING/SCANNED→DENIED）。見 api-contract §3.4。**對外回應格式與儲存機制無關**（端點 D 的 `session.token` 內容不變），故 `docs/api-contract.md` §3.4.D 無需改動。
 
 ```sql
 CREATE TABLE dbo.cross_device_sessions (
@@ -533,6 +536,7 @@ CREATE TABLE dbo.cross_device_sessions (
     user_ref_id        BIGINT        NULL,
     credential_pk      BIGINT        NULL,
     issued_jti         NVARCHAR(64)  NULL,
+    issued_jwt         NVARCHAR(4000) NULL,
     expires_at         DATETIME2(3)  NOT NULL,
     scanned_at         DATETIME2(3)  NULL,
     confirmed_at       DATETIME2(3)  NULL,
@@ -604,5 +608,6 @@ CREATE INDEX IX_xdev_expires ON dbo.cross_device_sessions (expires_at);
 | DB17 | 新增第七張表 `tenant_app_bindings` 存租戶授權 App 簽章指紋（origin-binding.md OB3 選項 B，已拍板；未採選項 A 的 `tenants` JSON 欄位） | 可逐筆稽核/輪替 App 授權、支援一租戶多 App、指紋建唯一索引防重複；已回填 CLAUDE.md 六張→七張 |
 | DB18 | 新增第八張表 `signing_keys` 持久化 session JWT 簽章金鑰（私鑰 PKCS#8、公鑰 X.509 直存 VARBINARY，TDE 保護，不加應用層封裝）；filtered unique index 保證至多一把 ACTIVE 並兼作多實例首啟競態防護 | 解決記憶體金鑰重啟即換、多實例 JWKS 不一致的部署缺口；DB 天然支援多實例共享、沿用既有 TDE，優於檔案+部署層同步方案。已回填 CLAUDE.md 七張→八張 |
 | DB19 | 新增第九張表 `cross_device_sessions`（情境三跨裝置 QR 登入 session：狀態機、雙方 IP、確認碼、120 秒 TTL、1:1 包住一列 `auth_challenges`）；含 `proximity_mismatch` BIT 便於查詢（S2 警示制，不影響登入成敗，權威稽核仍走 `audit_log.detail`）。非稽核來源、短生命週期清理比照 `auth_challenges` | 情境三（S4，擁有者已拍板）；用新表隔離狀態機/雙方 IP/確認碼、避免污染同裝置 `auth_challenges` 語意，同時 1:1 外鍵讓 assertion 密碼學驗證重用既有 ceremony 入口。已回填 CLAUDE.md 八張→九張 |
+| DB20 | `cross_device_sessions` 新增 `issued_jwt NVARCHAR(4000) NULL` 欄，持久化端點 C 簽發、待端點 D 領取的完整 session JWT，取代原單機記憶體 `Map`；端點 D 以「守衛 UPDATE（`WHERE status='CONFIRMED'`、檢查受影響列數=1）＋領取後清為 NULL」保證一次性領取與多實例正確性 | 擁有者確認 `fido-server` 將以容器動態調節 pod 數量水平部署，端點 C/D 可能落在不同 pod，原記憶體暫存會讀不到（功能性中斷）。此為情境三設計時即預告的「最乾淨作法」（該表已存在、屬 TDE 加密庫、JWT 120 秒一次性、落庫風險低），屬既定方向的執行細節，同 DB18 金鑰持久化的拍板層級，未另需擁有者重新拍板。長度 4000：最壞情況 `cid`=VARBINARY(1024) credential id 之 base64url≈1366 字、全 JWT≈3.2KB，NVARCHAR(4000) 為足以容納的最大非 MAX 長度（超出時 SQL Server row-overflow 自動處理，不硬失敗） |
 
 > 待複核項：DB2（API Key 雜湊儲存）、DB14（1:1 憑證裝置關係）、DB15（單 schema 邏輯隔離）屬會影響實作與運維的取捨，建議優先確認。DB17 已由人類拍板（OB3 選項 B）。複核通過後交接 dev-engineer（JPA 實體，含新 `tenant_app_bindings` 實體）與 devops-engineer（建庫腳本、索引、清理 Job、TDE/備份，並重新在 LocalDB 驗證含第七張表的 schema 建置）。

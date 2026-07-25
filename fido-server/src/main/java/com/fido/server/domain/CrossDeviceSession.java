@@ -24,6 +24,7 @@ public class CrossDeviceSession {
     private Long userRefId;
     private Long credentialPk;
     private String issuedJti;
+    private String issuedJwt;
     private Instant expiresAt;
     private Instant scannedAt;
     private Instant confirmedAt;
@@ -125,6 +126,19 @@ public class CrossDeviceSession {
 
     public void setIssuedJti(String issuedJti) {
         this.issuedJti = issuedJti;
+    }
+
+    public String getIssuedJwt() {
+        return issuedJwt;
+    }
+
+    /**
+     * db-schema.md 第 11 節 DB20：端點 C 簽發、待端點 D 領取的完整 session JWT。只在
+     * {@code CONFIRMED} 態有值；端點 D 以守衛式 UPDATE 領取並轉 {@code CONSUMED} 時一併清為
+     * {@code null}（見 {@code CrossDeviceSessionRepository#consumeConfirmedJwt}）。
+     */
+    public void setIssuedJwt(String issuedJwt) {
+        this.issuedJwt = issuedJwt;
     }
 
     public Instant getExpiresAt() {
