@@ -81,7 +81,7 @@ fido:
       enabled: false
       extra-roots-location: "file:./poc-trust-roots/*.pem"
   dev-seed:
-    enabled: true
+    enabled: false
     tenant-name: "Demo Shop"
     rp-id: "shop.example.com"
     expected-origin: "https://shop.example.com"

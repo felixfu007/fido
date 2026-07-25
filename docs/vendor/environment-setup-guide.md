@@ -132,7 +132,7 @@
 |---|---|---|
 | `fido.challenge.ttl-seconds` | `60` | WebAuthn challenge 時效（秒），對齊 API 合約 |
 | `fido.rate-limit.default-tps` | `100` | 每租戶預設速率上限，可於 `tenants.rate_limit_tps` 逐租戶覆寫 |
-| `fido.dev-seed.enabled` | `true` | **正式部署必須關閉（設 `false`）並移除整個 `fido.dev-seed` 區塊**。此為開發用種子租戶，會以固定的公開 API Key（`dev-api-key-...`）建立一個 `Demo Shop` 租戶，正式環境保留等於開了一個人人可用的後門。 |
+| `fido.dev-seed.enabled` | `false` | 預設已關閉，正式部署**不需**也**不應**額外開啟。此為開發用種子租戶，開啟後會以固定的公開 API Key（`dev-api-key-...`）建立一個 `Demo Shop` 租戶；本機開發如需這個示範租戶，須自行加 `--fido.dev-seed.enabled=true` 明確開啟，不會預設出現。正式部署時應確認未被人為覆寫成 `true`，並移除整個 `fido.dev-seed` 區塊。 |
 | `management.endpoints.web.exposure.include` | `health,info` | 只暴露 health / info 兩個 actuator 端點 |
 | `management.endpoint.health.show-details` | `never` | 健康檢查不對外洩漏細節 |
 | `logging.level.com.fido.server` | `INFO` | 日誌等級 |
@@ -207,7 +207,7 @@ API KEY（以下明碼只印一次，之後系統無法再查回）：
 
 **請立即透過安全管道（加密通訊、密碼管理工具等）轉交給採用廠商，絕對不要把這組金鑰貼到 log 檔、issue tracker、聊天工具或版本控制系統。** 開通過程會寫入一筆 `audit_log`（`event_type=TENANT_PROVISIONED`），稽核紀錄只含 `tenant_uid`/API Key 前綴，不含明碼。
 
-> `DevDataSeeder`（`fido.dev-seed.*`）僅供開發，種入公開字串 API Key 的示範租戶，**正式環境務必確認關閉**（`fido.dev-seed.enabled=false`），正式租戶一律走本機 CLI 開通，不再人工 `INSERT`。
+> `DevDataSeeder`（`fido.dev-seed.*`）僅供開發，種入公開字串 API Key 的示範租戶，**預設即為關閉**（`fido.dev-seed.enabled` 預設值 `false`）；本機開發若想要這個示範租戶方便測試，需自行加 `--fido.dev-seed.enabled=true` 明確開啟。正式環境確認未被覆寫成 `true` 即可，正式租戶一律走本機 CLI 開通，不再人工 `INSERT`。
 
 ### 6.3 原生 App 情境租戶的額外步驟（`add-app-binding`，opt-in）
 

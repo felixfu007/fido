@@ -28,3 +28,20 @@ target/
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# Environment / secret files
+.env
+.env.*
+!.env.example
+
+# Keystores / certificate stores (NOTE: do NOT add a blanket *.pem rule here —
+# fido-server/poc-trust-roots/*.pem and
+# fido-server/src/main/resources/android-attestation-roots/*.pem are
+# intentionally committed public certificates required by the production build)
+*.jks
+*.p12
+*.pfx
+
+# IDE
+.idea/
+.vscode/
