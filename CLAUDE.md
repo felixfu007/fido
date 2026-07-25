@@ -171,6 +171,14 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
 CI pipeline（原本盤點出的缺口之一）已建立，見下方「CI pipeline」段落。SQL Server 正式環境套用
 （`infra/sql/` 腳本尚未在真正的 SQL Server 實例上驗證過）因目前無可用環境，暫緩處理，非本次範圍。
 
+**採用廠商文件試跑（adopting-vendor-engineer 模擬客戶視角）盤點出 22 項卡點，systems-analyst 已處理**：19 項為文件矛盾/範例缺漏/格式未定義，已直接修正對應 `docs/vendor/*.md`（含最嚴重的「JWT 金鑰是否持久化」三份文件互相矛盾 #1、`maintenance §9` 自相矛盾 #2/#21、`xdevId` vs `qrUrl` 安全語意疑點 #15，及 #3–#5/#7–#13/#16–#19/#22 各項；已對照 `JwtService`/`SigningKeyFactory`/`AdminCliRunner`/`FidoSessionJwtValidator`/`db-schema` 查證後才寫，未憑空編）。以下 3 項屬產品/機制**增強**（非文件即可解、非阻塞），列為低優先待辦：
+
+- **（低優先）採用廠商無自助管道確認「自己取得的版本是否含情境三（跨裝置 QR）等功能」（原報告 #6 / #14）**：目前唯一途徑是「向平台營運方確認」（文件已如此指引）。可評估的增強：於 `/actuator/info` 揭露 build 版本與 feature flag（例如 cross-device 是否啟用），讓採用廠商可自助查詢。屬產品決策，需先評估是否要對外揭露功能開關資訊（資安面）。
+- **（低優先）跨裝置 `DENIED` 細部原因不回傳桌機（原報告 #18 的增強面）**：現行行為（`denyReason` 僅寫 `audit_log`、桌機只看到通用 `DENIED`）為**刻意**避免向桌機洩漏「該手機是否已註冊本站憑證」，已在 `api-integration-guide §11.2` 誠實記為限制。若未來有租戶明確要求對「使用者主動取消」vs「本機無憑證」給不同桌機文案，需 systems-analyst 評估「回傳粗粒度原因是否引入列舉風險」後再定，屬合約層變更。
+- **（低優先）備份檔清理 / 異地備援僅有文字建議、無可直接套用的腳本範本（原報告 #20）**：`maintenance §2.3` 已給最低保留建議（FULL 5 份 / DIFF 14 天 / LOG 8 天）與方向（Maintenance Plan 或 OS 排程），但未附實際 PowerShell/robocopy/`sp_delete_backuphistory` 範本。可由 devops-engineer 於 `infra/sql/` 或 `docs/vendor/` 補一份可調整的清理＋異地同步腳本範本。
+
+（另：`maintenance §11.3` 已載明的「每租戶 proximity strict 政策」仍為既有的未來可擴充項，不重複列。）
+
 新的待辦事項出現時，請沿用既有慣例：在此列出簡短條目，完成後移除並把細節併入「目前階段」對應段落，
 不要讓已完成項目長期留在本清單。
 

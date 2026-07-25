@@ -67,6 +67,10 @@
 | 5.1 | GET | `/api/v1/users/{externalUserId}/fido-status` | 查詢使用者 FIDO 綁定狀態 |
 | 5.2 | GET | `/api/v1/users/{externalUserId}/audit-events` | 稽核事件查詢（客服用，v1 可延後） |
 
+> **關於「#」欄編號**：此欄是**合約文件 [`../api-contract.md`](../api-contract.md) 的章節編號**（方便你回查權威定義），**不是**本手冊自己的章節編號（本手冊第 3.1/3.2/3.3 節是「流程」小節，與此欄的 2.1/3.1 等無對應關係）。查權威欄位定義時請以此欄編號到 api-contract.md 對照。
+>
+> **關於跨裝置 QR 登入端點**：上表**刻意只列出貴公司後端會呼叫的兩個**（`3.4.A` 建立 session、`3.4.D` 桌機輪詢）。跨裝置流程另有三個端點（`3.4.B` claim、`3.4.C` result、`3.4.E` deny）由**平台提供的手機 App 直連** fido-server、不帶 `X-API-Key`、貴公司後端**不經手**，故不列在貴公司要串接的清單裡（這**不是**遺漏）。完整五端點與呼叫方拆分見第 11 節與 api-contract.md §3.4。
+
 ### 3.1 註冊流程（新增一台 FIDO 裝置）
 
 前提：使用者已用貴公司**既有帳密系統**登入（FIDO 是加掛選項，不取代帳密）。
@@ -165,6 +169,12 @@ Claims：
 6. 檢查 `jti` **未被用過**（一次性消費，防重放）。
 7. 全部通過，才以 `sub`（= `externalUserId`）建立貴公司自家登入 session。
 
+**關於時鐘偏移（clock skew）**：
+
+- JWT 只有 **120 秒**效期，`iat`/`exp` 的比對對兩端時鐘一致性敏感。**務必讓貴公司後端主機與 fido-server 主機都以 NTP 同步時鐘**——這是最重要的一步，遠比調容忍度重要。
+- 參考範例 `FidoSessionJwtValidator` 使用 JJWT 預設值（**容忍度 = 0 秒**），未特意放寬。若貴公司環境時鐘可能有數秒誤差，可在驗證器設一個**小幅**容忍度（JJWT 的 `Jwts.parser().clockSkewSeconds(n)`），但**務必遠小於 120 秒**（例如 ≤5 秒）——設太大等於變相延長 token 有效期、削弱短效設計的防重放價值。
+- 若大量出現「JWT 剛簽發卻被判過期 / 尚未生效」，優先懷疑兩端時鐘未同步，而非調大容忍度。
+
 > 參考範例 `shopping-site-reference` 的 `FidoSessionJwtValidator` 就是這個模式的具體實作：它刻意**不信任回應的 `verified` 欄位**，只信任自行驗過的 JWT。請照抄此模式。
 
 ---
@@ -244,6 +254,16 @@ Claims：
 
 > 提醒：由於伺服器對「查無 / 不屬於該使用者」一律回 200（防列舉，見第 8 節），伺服器回 200 **不代表**它幫你做了終端使用者授權把關——授權完全是貴公司後端的責任。
 
+### 6.4 `externalUserId` 的格式與長度
+
+`externalUserId` 是**貴公司自訂的、代表某位使用者的識別字串**，伺服器只把它當不透明鍵值儲存與比對，不解讀其語意。約束如下（已對照原始碼與 DB schema）：
+
+- **必填、不可為空白**（伺服器端 `@NotBlank`；空白會回 `400 VALIDATION_ERROR`）。
+- **最大長度 255 字元**（落庫欄位 `fido_user_ref.external_user_id` 為 `NVARCHAR(255)`；為 Unicode 欄位，非 ASCII 字元亦可，但長度以此為上限）。
+- **字元集無額外白名單限制**（除了非空白）。伺服器不強制特定格式。
+- **在同一租戶內，同一個 `externalUserId` 唯一對應一位使用者**（`UNIQUE(tenant_id, external_user_id)`）；跨租戶各自獨立、互不影響。
+- **建議**：使用貴公司內部**穩定、不會變動、且非個資**的識別（例如內部 user id 而非 email / 手機號）。此值一旦與 FIDO 憑證綁定就不宜變動；若使用個資當識別，該值會出現在 session JWT 的 `sub` claim，請自行評估隱私影響。
+
 ---
 
 ## 7. 原生 App 情境的 opt-in 綁定申請流程
@@ -283,11 +303,24 @@ Claims：
 
 把 `package_name` + `sha256_cert_fingerprints` 提供給平台營運方，由營運方透過本機 admin CLI 的 `add-app-binding` 指令登錄（CLI 自動換算成 `android:apk-key-hash:<base64url>` 形式的 app origin，寫入該租戶的 `tenant_app_bindings` 一列；指令用法見 [`environment-setup-guide.md`](environment-setup-guide.md) 第 6.3 節）。
 
-> v1 沒有自助管理端點（origin 綁定決策 OB6：採人工 onboarding，由平台維運方在主機上執行 CLI）。此清單是伺服器把 app origin 納入租戶允許清單的權威來源。純瀏覽器租戶不需要此表任何列。支援一租戶多支 App / 多組簽章（正式 + 測試）。
+> **指紋格式（與 `assetlinks.json` 對齊，不需自行換算）**：`add-app-binding` 的 `--fido.admin.app.sha256-fingerprint` 參數**直接接受你放進 `assetlinks.json` 的那串冒號分隔大寫 hex**（如 `AB:CD:EF:...:12:34`，冒號與空白會被忽略），**也**接受不含冒號的 64 字元 hex 或 base64。CLI 內部才換算成 `android:apk-key-hash:<base64url>` 落庫——這個 `apk-key-hash` 形式是**伺服器內部比對用**的，你**不需要**自己算，交給平台營運方原樣的指紋即可。也就是說：`assetlinks.json` 裡填什麼指紋，交給平台登錄的就是同一串，兩邊天生對齊。
+>
+> v1 沒有自助管理端點（origin 綁定決策 OB6：採人工 onboarding，由平台維運方在主機上執行 CLI）。此清單是伺服器把 app origin 納入租戶允許清單的權威來源。純瀏覽器租戶不需要此表任何列。支援一租戶多支 App / 多組簽章（正式 + 測試）——每組指紋各執行一次 `add-app-binding`。
+
+**(C) 確認綁定是否成功**
+
+v1 沒有「查詢我的 App 綁定」自助端點，確認方式有二：
+
+1. **登錄端回報**：平台營運方執行 `add-app-binding` 成功時，CLI 會印出 `App 授權新增成功` 區塊（含 `rp_id`/`package_name`/換算後的 `apk_key_hash_origin`），並寫一筆 `audit_log`（`event_type=TENANT_APP_BINDING_ADDED`）。可請營運方回傳此輸出作為完成憑證。
+2. **端對端冒煙測試（最可靠）**：在**已安裝正式簽章 App 的實機**上，於 App 內觸發一次 FIDO 註冊或登入 ceremony：
+   - 若能正常進入生物辨識、且伺服器不回 `403 ORIGIN_NOT_ALLOWED` → 綁定生效。
+   - 若回 `403 ORIGIN_NOT_ALLOWED` → 綁定未生效或指紋不符，逐項檢查：(a) 交付登錄的指紋是否為該 App **實際簽章**的指紋（若用 Google Play App Signing，須用 **Google 重新簽章後**的指紋，而非上傳金鑰指紋）；(b) `assetlinks.json` 是否已就位（見下方 7.3）；(c) `package_name` 是否一致。
 
 ### 7.3 上線注意
 
-原生 App 情境的真實 Digital Asset Links 行為與各家 OEM 相容性，v1 僅在 Pixel 9 上驗證過，其他機型未全面覆蓋（見技術限制手冊第 6 節）。opt-in 設計讓「某租戶開通 App 登入」與「平台整體上線」脫鉤——未開通前不影響任何人。
+- **`assetlinks.json` 生效延遲 / 快取**：Android 系統（Credential Manager / App Links 驗證）會在 App 安裝或更新時抓取並驗證 `https://<rpId>/.well-known/assetlinks.json`，且**可能快取一段時間**。剛部署或剛修改 `assetlinks.json` 時，裝置端不一定立即看到最新內容。實務建議：先確保檔案已正確就位（正確路徑、`Content-Type: application/json`、HTTPS 可公開讀取、內容與 App 簽章一致）**再**發佈 App 或請使用者更新；測試時若剛改過檔案，可在測試機重裝 App 以強制重新驗證。**注意分工**：`assetlinks.json` 是**客戶端（OS）驗證 App↔網域關係**用的；伺服器端把 app origin 納入允許清單靠的是 `tenant_app_bindings`（`add-app-binding` 寫入，**立即生效、無快取**）。兩者都要到位，App 內 FIDO 才會通。
+- **OEM 相容性**：原生 App 情境的真實 Digital Asset Links 行為與各家 OEM 相容性，v1 僅在 Pixel 9 上驗證過，其他機型未全面覆蓋（見技術限制手冊第 6 節）。
+- opt-in 設計讓「某租戶開通 App 登入」與「平台整體上線」脫鉤——未開通前不影響任何人。
 
 ---
 
@@ -469,6 +502,24 @@ Response 200：
 ```json
 { "keys": [ { "kty": "EC", "crv": "P-256", "kid": "2026-fido-1", "x": "...", "y": "...", "use": "sig", "alg": "ES256" } ] }
 ```
+> 輪替後此清單會同時含 `ACTIVE` 與 `RETIRED` 兩把公鑰（多一個 `kid`），供過渡期驗簽；驗證時依 JWT header 的 `kid` 選對應公鑰即可。
+
+### 9.9 稽核事件查詢 — `GET /api/v1/users/{externalUserId}/audit-events`（客服用，選配）
+
+> **實作狀態**：合約有定義（api-contract.md §5.2 / D11），但屬**第一版可延後**的選配端點，貴公司取得的版本**不保證已實作**；導入前請向平台營運方確認。用途是客服在「帳密救援為主、客服人工為後盾」時查閱某使用者的 FIDO 操作歷程。`{externalUserId}` 同樣**必須取自後端登入 session**（第 6 節）。
+
+Query：`from`、`to`（ISO8601）、`type`（事件類型過濾）、`limit`（預設 50，最大 100）、`cursor`。
+
+Response 200：
+```json
+{
+  "events": [
+    { "eventId": "ev_...", "type": "AUTH_SUCCESS", "deviceId": "dev_5a1b...", "at": "2026-07-21T09:12:44Z", "detail": {} },
+    { "eventId": "ev_...", "type": "AUTO_REVOKE_COUNTER_REGRESSION", "deviceId": "dev_5a1b...", "at": "2026-07-20T22:01:10Z", "detail": {} }
+  ],
+  "nextCursor": null
+}
+```
 
 ---
 
@@ -493,7 +544,7 @@ Response 200：
 
 ### 11.1 呼叫方拆分（重要）
 
-跨裝置流程有四個 fido-server 端點，分兩類呼叫方：
+跨裝置流程有五個 fido-server 端點，分兩類呼叫方：
 
 | 端點 | 呼叫方 | 認證 | 貴公司要做的事 |
 |---|---|---|---|
@@ -501,17 +552,32 @@ Response 200：
 | B `POST .../{xdevId}/claim` | **手機 App 直連** | `xdevId`（不帶 API Key） | **無**——手機 App（平台提供）直接打，貴公司不經手 |
 | C `POST .../{xdevId}/result` | **手機 App 直連** | `xdevId`（不帶 API Key） | **無**——同上 |
 | D `GET .../{xdevId}/status` | **貴公司後端** | `X-API-Key` + `desktopClientIp` | 代桌機輪詢；`CONFIRMED` 時取回 session JWT |
+| E `POST .../{xdevId}/deny` | **手機 App 直連** | `xdevId`（不帶 API Key） | **無**——使用者在手機取消 / 本機無對應憑證時，手機 App 直接打，貴公司不經手 |
 
-貴公司只串接 A 與 D；B/C 是手機 App 與 fido-server 之間的事，貴公司後端不參與。
+貴公司只串接 A 與 D；B/C/E 是手機 App 與 fido-server 之間的事，貴公司後端不參與。手機端呼叫 E 主動放棄後，貴公司後端在端點 D 會輪詢到 `DENIED`（見 11.2 步驟 3）。
 
 ### 11.2 串接流程
 
 1. 桌機登入頁按「用手機掃碼登入」→ 貴公司後端呼叫 **A**，帶 `desktopClientIp`（= 桌機瀏覽器真實 client IP，從貴公司自己請求的 `remoteAddr`/`X-Forwarded-For` 取得後轉發；伺服器看到的直接來源是貴公司後端、非桌機）。取回 `xdevId`/`qrUrl`/`verificationCode`/`expiresIn`（120 秒）。
-2. 桌機把 `qrUrl` 顯示成 QR，並顯示 `verificationCode` 供使用者與手機畫面比對。**`xdevId` 是能力憑證，貴公司後端應以 httpOnly cookie 或伺服器端對映把它綁定到這個桌機瀏覽器 session，不要把 `xdevId` 直接回給前端 JS**（避免第三方拿到 `xdevId` 冒領結果）。
+
+   > **多層反向代理 / CDN 下如何取 `desktopClientIp`**：`desktopClientIp` 只用於 proximity 稽核，而 proximity 是**只警示、不阻擋**（見 11.4）——因此取值**求「盡量接近真實桌機出口 IP」即可，取錯不會擋登入、也不會造成錯誤授權**，只影響稽核訊號品質。實務建議：
+   > - 若貴公司前方有可信的反向代理 / 負載平衡器 / CDN，`X-Forwarded-For` 會是逗號分隔的 IP 鏈（`client, proxy1, proxy2...`）。**取你信任的最外層代理所附加的那個 client IP**（通常是**最左側**、但前提是你確認整條鏈上的中間節點都可信、不會被使用者偽造 header）；不可信任的環境下應以「你自己那層可信代理實際看到的 remote address」為準，而非盲信最左側。
+   > - 用貴公司 Web 框架已解析好的 client IP（如 Spring 的 `ForwardedHeaderFilter` / `RemoteIpValve` 設定好 trusted proxies 後的 `request.getRemoteAddr()`）最穩妥，避免自己手解 `X-Forwarded-For`。
+   > - 取不到精確值時，帶上你能取得的最佳近似值即可；切勿因此阻斷流程。
+2. 桌機把 **`qrUrl`** 顯示成 QR，並顯示 `verificationCode` 供使用者與手機畫面比對。
+
+   > **釐清 `xdevId` 與 `qrUrl` 的關係（避免誤解「不要交給前端」與「顯示成 QR」的表面矛盾）**：
+   >
+   > - `qrUrl` 的形式是 `https://<fido-app-link-host>/x/<xdevId>`，**其中確實內嵌了 `xdevId`**——`xdevId` 是 QR 唯一承載的內容，QR 本來就是要給使用者的手機掃描的，所以 `xdevId` 出現在 QR 圖片裡是**設計如此、無法也不需要隱藏**。你要交給前端渲染成 QR 圖片的欄位就是 `qrUrl`（等同 `xdevId`）。建議由**後端**把 `qrUrl` 直接算成 QR 圖片（或 data URL）回給前端 `<img>`，讓原始字串不成為前端 JS 的一級變數，但安全性**並不依賴**隱藏這個值。
+   > - 「**不要把 `xdevId` 交給前端 JS**」這條規則管的**不是** QR 渲染，而是**輪詢/領取結果的通道**：決定「哪個桌機瀏覽器最後能領到 CONFIRMED 的 session JWT」的綁定，**必須由貴公司後端在伺服器端維護**（例如發一個 httpOnly cookie，把「本次桌機瀏覽器 session」對映到 `xdevId`），**你的輪詢端點只認這個 cookie，絕不接受由前端 JS 用參數帶進來的 `xdevId`**。
+   > - 為什麼：`xdevId` 印在 QR 上，任何人只要拍到 QR 或旁觀到就能得知它。若你的輪詢/領取是「前端拿著 `xdevId` 來換結果」，那麼拍到 QR 的第三方就能冒領受害者的登入結果（把受害者剛完成的 FIDO 登入 session 建立到攻擊者的瀏覽器）。改以伺服器端 httpOnly cookie 綁定「發起該 session 的那一個瀏覽器」，就能確保 CONFIRMED 的 JWT 只交回原本那台桌機。
+   > - 補充第二層保護：即使第三方直接拿 `xdevId` 去打 **fido-server 的端點 D**，該端點要求貴公司後端的 `X-API-Key`（前端與第三方都沒有），也拿不到 JWT。
+   > - `shopping-site-reference` 參考範例即是此模式：後端設一個 httpOnly `XDEV_POLL` cookie 綁定瀏覽器與 `xdevId`，poll 端點只認 cookie、不接受查詢參數帶 `xdevId`。請照抄此模式。
 3. 桌機每 2–3 秒請貴公司後端輪詢 → 後端帶 `desktopClientIp` 呼叫 **D**：
    - `PENDING`/`SCANNED` → 尚未完成，繼續輪詢。
    - `CONFIRMED` → 回應含 `session.token`（JWT）與 `warnings.proximityMismatch`。**此 JWT 只能領一次**（領後 session 轉 `CONSUMED`）。
    - `DENIED`（使用者在手機取消 / 手機上無對應憑證）→ 停止輪詢、顯示對應訊息。
+     - **限制（誠實揭露）**：端點 D 回應的 `DENIED` **不會告訴桌機「是哪一種原因」**（「使用者主動取消」vs「本機無對應憑證」）。細部原因（`USER_CANCELLED`/`NO_CREDENTIAL`/`UNSPECIFIED`）只寫入 fido-server 的 `audit_log.detail.denyReason` 供事後稽核，**不回傳到桌機**（避免向桌機端洩漏「該手機是否已註冊本站憑證」這類可被探測的資訊）。因此桌機端只能顯示**一則通用訊息**（例如「登入未完成，請重新產生 QR 或改用帳密登入」），無法據此對兩種情況給不同引導文案。若貴公司有此需求，請提報平台營運方評估（見下方待辦/未來擴充）。
    - 逾時 → `XDEV_SESSION_EXPIRED` / `EXPIRED`，顯示「QR 已過期，請重新產生」。
 4. 拿到 `CONFIRMED` + JWT 後，**收尾與一般登入完全相同**：依第 4 節驗 JWT（JWKS 驗簽 + iss/aud/exp/jti），驗過才建立自家登入 session。**不要**只看回應的 `status`。
 

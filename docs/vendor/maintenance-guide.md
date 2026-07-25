@@ -10,7 +10,7 @@
 
 | 對象 | 內容 | 對應建置腳本 |
 |---|---|---|
-| `fido-server` 應用 | Spring Boot jar，無狀態（唯一的行程內狀態是 session JWT 簽章金鑰，見第 4 節） | — |
+| `fido-server` 應用 | Spring Boot jar，無狀態（session JWT 簽章金鑰持久化於資料庫、啟動時載入記憶體，多實例載入的是同一把，見第 4 節；非各實例獨立的行程內狀態） | — |
 | SQL Server `FidoServerDb` | 九張核心表，TDE 全庫加密 | `001`–`004` |
 | 備份 Agent Job | 完整 / 差異 / 交易記錄備份 | `005` |
 | 清理 Agent Job | challenge 過期標記 / 清除、`audit_log` 1 年保留清理 | `006` |
@@ -83,6 +83,7 @@ java -jar fido-server.jar --spring.profiles.active=admin-cli --fido.admin.comman
 
 - **貴公司後端應對 JWKS 快取設較短 TTL**（參考範例用 300 秒），並在驗簽失敗時重新拉取 JWKS，以便在手動輪替後盡快取得新公鑰。
 - `signing_keys` 表為組態性資料，正常只會有一把 `ACTIVE`；輪替產生的 `RETIRED` 列可在確認無驗簽需求後（建議等待遠超過 120 秒的安全緩衝，例如數小時）由維運人員視需要手動清理，非必要動作。
+- **不需要日常人工檢查**：金鑰已持久化且多實例天然共享，第 10 節日常運維檢查清單**刻意不含**「檢查簽章金鑰」項目——除非主動執行輪替，否則金鑰不會變動。金鑰隨資料庫 TDE 全庫加密與標準備份一併受保護，無獨立的日常維護動作。
 
 ---
 
@@ -138,7 +139,7 @@ java -jar fido-server.jar --spring.profiles.active=admin-cli --fido.admin.comman
 | challenge 逾期率（`CHALLENGE_EXPIRED` 比例） | 使用者完成 ceremony 前逾時的比例 | 明顯上升 → 前後端延遲 / 網路 / 時鐘問題 |
 | 異常自動撤銷率（`AUTO_REVOKE_COUNTER_REGRESSION`） | sign counter 倒退次數 | 上升 → **安全可疑訊號**，可能有金鑰複製嘗試，資安應介入 |
 | `ATTESTATION_CHAIN_INVALID` / `HARDWARE_SECURITY_NOT_MET` 比例 | 大量裝置無法通過硬體驗證 | 突增 → 可能是特定 OEM 相容性問題（見技術限制手冊 OEM 覆蓋）或設定誤改 |
-| 跨裝置 QR 登入 proximity 不符率（`audit_log.detail.proximityMismatch=true` 佔 `XDEV_CONFIRMED` 比例） | 桌機/手機出口 IP 不一致的比例（見第 11 節） | 明顯偏高 → 可能是正常誤判（行動網路 vs Wi-Fi）也可能是中繼攻擊；短時間單一租戶/使用者暴增 → 安全可疑，資安評估 |
+| 跨裝置 QR 登入 proximity 不符率（見下方定義） | 桌機/手機出口 IP 不一致的比例（見第 11 節） | 明顯偏高 → 可能是正常誤判（行動網路 vs Wi-Fi）也可能是中繼攻擊；短時間單一租戶/使用者暴增 → 安全可疑，資安評估 |
 | `INTERNAL_ERROR`（500）率 | 伺服器內部異常 | 任何持續 500 → 查日誌 |
 | SQL Server Agent Job 狀態 | 備份 / 清理 Job 是否失敗或停用 | Job 失敗 → 告警（尤其備份 Job） |
 | 資料庫連線 / 交易記錄檔成長 | DB 健康度 | 記錄檔異常成長 → 查交易記錄備份是否正常 |
@@ -158,7 +159,7 @@ v1 設計目標為**中小規模**（對齊 CLAUDE.md）：
 | 部署形態 | 全地端部署（非雲端） |
 
 - 這個規模下，SQL Server 資料量成長平緩，備份與清理排程的預設頻率足夠。
-- 若貴公司預期顯著超過此規模（例如遠高於 100 TPS 或百萬級會員），須先評估：多實例部署下的 JWT 簽章金鑰共享（第 4 節）、速率上限調整、`audit_log` 是否改用分割表清理、資料庫資源（CPU / IO / 記憶體）擴充。超出此容量目標屬架構調整範疇。
+- 若貴公司預期顯著超過此規模（例如遠高於 100 TPS 或百萬級會員），須先評估：速率上限調整、`audit_log` 是否改用分割表清理、資料庫資源（CPU / IO / 記憶體）擴充。超出此容量目標屬架構調整範疇。（**JWT 簽章金鑰在多實例部署下已天然共享、無需額外處理**，見第 4 節——這不再是擴充時要自行解決的項目。）
 
 ---
 
@@ -167,7 +168,7 @@ v1 設計目標為**中小規模**（對齊 CLAUDE.md）：
 - **schema 變更以 `infra/sql/002` 為權威**：`fido-server` 的 `spring.jpa.hibernate.ddl-auto=validate`，只驗證 entity 與既有 schema 是否一致、**不會自動改 schema**。升級若涉及 schema 變更，須先套用對應的 DDL 遷移腳本，再啟動新版應用；否則 `validate` 會在啟動時報結構不一致而拒絕啟動。
 - **升級前務必先做完整備份**（並確認可還原）。
 - **設定檔審查**：升級後重新核對環境建置手冊第 8 節的部署檢查清單，特別是 `fido.attestation.mode=real`、`poc-trust.enabled=false`、`dev-seed.enabled=false` 這幾項安全開關沒有被新版預設值或設定合併覆蓋回不安全狀態。
-- **JWKS / JWT 相容性**：升級重啟會更換簽章金鑰（第 4 節），滾動升級期間要留意正在交接的 session；建議在低峰執行。
+- **JWKS / JWT 相容性**：簽章金鑰持久化於 `signing_keys` 表，**升級與重啟不會更換金鑰**（第 4 節），滾動升級中新舊實例載入的是同一把 `ACTIVE` 金鑰、JWKS 一致，正在交接的 session JWT 不受升級影響。**唯一**會更換金鑰的情況是維運方明確執行 `rotate-signing-key`（第 4.2 節）；若升級流程中刻意排入輪替，才需留意過渡窗口（此時 JWKS 同時發布新舊公鑰，≤120 秒內舊 token 仍可驗簽），建議在低峰執行。
 - **驗證**：升級後跑一次註冊 → 登入 → 撤銷的冒煙測試，並確認 `/actuator/health`、JWKS 端點正常。
 
 ---
@@ -197,7 +198,11 @@ v1 設計目標為**中小規模**（對齊 CLAUDE.md）：
 
 ### 11.2 維運人員可以做什麼
 
-- **追蹤異常頻率**：以 `audit_log` 查詢 `event_type='XDEV_CONFIRMED'` 且 `detail.proximityMismatch=true` 的比例與趨勢（依租戶、依使用者）。偶發不符多屬正常誤判（手機走行動網路、桌機走 Wi-Fi；企業/校園多重出口 NAT）。
+- **追蹤異常頻率**：
+  - **指標定義（分子/分母）**：proximity 檢查**只在 cross-device ceremony 的確認那一步（fido-server 端點 C，手機提交 assertion result）發生**，其結果 `proximityMismatch`（true/false）**只寫在 `XDEV_CONFIRMED` 這個稽核事件的 `detail` 上**，不會出現在 `XDEV_SESSION_CREATED`/`XDEV_CLAIMED`/`XDEV_CONSUMED`/`XDEV_DENIED` 等其他 `XDEV_*` 事件。因此不符率的唯一正確定義為：
+    - 分母 = `event_type='XDEV_CONFIRMED'` 的事件數；
+    - 分子 = 其中 `detail.proximityMismatch=true` 的事件數。
+  - 以此比例與趨勢（依租戶、依使用者）觀察。偶發不符多屬正常誤判（手機走行動網路、桌機走 Wi-Fi；企業/校園多重出口 NAT）。
 - **辨識可疑樣態**：單一使用者短時間內大量 proximity 不符、或某租戶不符率異常飆高，應升級給資安評估是否有中繼攻擊嘗試。
 - **協助個別租戶**：若某租戶回報其使用者族群誤判率過高造成困擾，可協助檢視其網路拓撲、或（見下）評估未來的每租戶策略調整。
 

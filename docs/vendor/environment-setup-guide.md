@@ -91,6 +91,22 @@
 
 `001` 把資料庫設為 FULL 復原模式後，在「第一次完整備份」執行之前，交易記錄備份會失敗（LSN 鏈未建立）。因此執行完 `001`–`004` 後，請**立即手動觸發一次 `FidoServerDb - Full Backup` Job（或手動 `BACKUP DATABASE`）**，再讓排程接手。詳見維護手冊第 2 節。
 
+### 3.4 首次套用常見失敗與排查方向
+
+由於這批腳本尚未在正式 SQL Server 端對端跑過（§2.2 已誠實揭露），首次套用時最常卡在**未替換佔位值**與**環境前置未備妥**，而非腳本邏輯錯誤。逐項對照排查：
+
+| 症狀 / 錯誤 | 最可能根因 | 排查方向 |
+|---|---|---|
+| `001` `CREATE DATABASE` 失敗，找不到路徑 | `.mdf`/`.ldf` 目標資料夾不存在 | 先手動建立 §3.1 所列磁碟資料夾，SQL Server 不會自動建目錄 |
+| `001` 相容性層級 / 設定不被接受 | 相容性層級佔位值（`150`）與目標 SQL Server 版本不符 | 2022 改 `160`；確認目標版本 |
+| `004` 啟用 TDE 失敗 | `@MasterKeyPassword`/`@PvkPassword`/憑證路徑/到期日仍為 `REPLACE_WITH_...` 佔位值；或執行者非 sysadmin | 替換所有佔位值；以 sysadmin 執行 |
+| `005`/`006` `sp_add_job` 失敗 | `@owner_login_name`（範例 `sa`）在目標實例不存在或已停用；或 SQL Server Agent 未執行 | 改為實際存在的 sysadmin 登入；確認 Agent 服務為「執行中」且自動啟動 |
+| 備份 Job 跑成功但交易記錄備份失敗 | 尚未做第一次完整備份（LSN 鏈未建立） | 先手動觸發一次完整備份（§3.3） |
+| 應用啟動即報「schema 結構不一致」而拒絕啟動 | `ddl-auto=validate` 偵測到 entity 與實際 schema 不符（可能 `002` 未完整執行或版本落差） | 確認 `002` 已對 `FidoServerDb` 完整執行、九張表齊全；升級情境見維護手冊第 9 節 |
+| 應用啟動報無法連線資料庫 | `spring.datasource.*` 佔位值未替換 / 防火牆 / `encrypt`/`trustServerCertificate` 設定 | 對照 §4.1 替換連線字串；確認 1433 內網可達 |
+
+**強烈建議**：務必先在**獨立測試庫**把 `001`–`006` 連同「建表 → TDE → 備份 → 還原演練 → 清理 Job」完整走一遍，確認無誤再上正式庫。此為 §2.2 揭露之部署風險的具體降險做法。
+
 ---
 
 ## 4. 關鍵設定檔鍵值（`application.yml`）
@@ -122,9 +138,14 @@
 |---|---|---|
 | `fido.session-jwt.issuer` | `https://fido.example.internal` | JWT `iss` claim。**須改為貴公司實際的 fido-server 識別值**，且貴公司後端驗證 JWT 時的 expected issuer 必須與此一致（見 API 串接手冊 §4）。 |
 | `fido.session-jwt.ttl-seconds` | `120` | JWT 有效期（秒）。`exp = iat + 120`。 |
-| `fido.session-jwt.kid` | `2026-fido-1` | JWKS 對應的 key id。金鑰輪替時新增而非直接覆蓋。 |
+| `fido.session-jwt.kid` | `2026-fido-1` | **僅**做為「全新資料庫首次啟動、自動產生第一把金鑰時」的初始 `kid` 命名依據。一旦金鑰已存在於 `signing_keys` 表，`kid` 一律以資料庫該列為權威，改此設定值**不會**改變既有金鑰的 `kid`。手動輪替（`rotate-signing-key`）會自動產生新的 `kid`。 |
 
-> **金鑰管理的 v1 限制**：目前 `fido-server` 在**每次程序啟動時於記憶體產生一組 EC P-256 金鑰對**，程序重啟即更換金鑰、先前簽出的 JWT 全部失效。由於 JWT 僅 120 秒有效且只用於一次性 session 交接，重啟造成的影響僅限於重啟當下極短時間內的登入。正式版若需持久化金鑰與平滑輪替，須由採用廠商自行實作金鑰持久化（見維護手冊第 4 節與技術限制手冊）。
+> **金鑰持久化（v1.0.0 起已內建，非採用廠商需自行實作）**：`fido-server` 的 session JWT 簽章金鑰（EC P-256 / ES256）**持久化於資料庫 `signing_keys` 表**（私鑰以 PKCS#8 存 `VARBINARY`、由 TDE 全庫加密保護），**不是**每次啟動於記憶體重新產生。啟動行為：載入資料庫內既有的唯一 `ACTIVE` 金鑰；**只有全新資料庫（從未有任何金鑰）首次啟動才會自動產生一把並存入**，後續啟動一律載入不重生。因此：
+> - **正常重啟 / 版本升級不會更換金鑰**，先前簽出的 JWT 在其 120 秒效期內仍可正常驗簽。
+> - **多實例部署天然共享同一把 `ACTIVE` 金鑰**（所有連同一資料庫的實例載入同一把），跨實例簽發/驗證一致，**採用廠商不需自行實作任何跨實例金鑰共享機制**。
+> - 更換金鑰只在兩種情況發生：(a) 全新空庫首次啟動自動產生；(b) 平台維運方明確執行 admin CLI 的 `rotate-signing-key` 手動輪替。輪替後 JWKS 會同時發布新舊公鑰，過渡期內舊金鑰簽出、尚未過期（≤120 秒）的 JWT 仍可驗簽。
+>
+> 詳見維護手冊第 4 節、技術限制手冊第 12 項。
 
 ### 4.4 其他
 
@@ -165,6 +186,17 @@
 
 `fido-server` v1 **沒有提供對外的租戶管理 REST 端點**（對齊 origin 綁定決策 OB6：租戶開通採人工 onboarding），改以**本機 admin CLI** 開通，由平台維運方（賣方）在伺服器主機上直接執行，不開任何網路端口。
 
+> **重要：所有 admin CLI 指令都要連到「正式那顆」SQL Server**。`admin-cli` profile 只關掉 web server（`spring.main.web-application-type=none`），**資料庫連線設定不會自動帶入**——它沿用 `application.yml` 的 `spring.datasource.*`，或由你在命令列 / 環境變數覆寫。若正式環境的 datasource 是以外部設定（環境變數 / 啟動參數）注入、而非寫死在 `application.yml`，那麼執行 CLI 時**必須一併帶上相同的 datasource 參數**，否則 CLI 會連錯庫（或因無 datasource 而啟動失敗），出現「開通成功卻在正式庫查不到租戶」「找不到 ACTIVE signing key 無法輪替」等症狀。本節後續每個指令範例為求簡潔省略了這些參數，實際執行時請比照第 5 節那樣補上，例如：
+>
+> ```
+> java -jar fido-server.jar --spring.profiles.active=admin-cli \
+>   --spring.datasource.url="jdbc:sqlserver://db-host:1433;databaseName=FidoServerDb;encrypt=true" \
+>   --spring.datasource.username="fido_app" \
+>   --spring.datasource.password="******" \
+>   --fido.admin.command=<指令> ...
+> ```
+> （密碼建議用環境變數 `SPRING_DATASOURCE_PASSWORD` 等，避免出現在行程參數與 shell 歷史。）
+
 ### 6.1 `create-tenant` 指令
 
 ```
@@ -175,6 +207,22 @@ java -jar fido-server.jar --spring.profiles.active=admin-cli \
   --fido.admin.tenant.expected-origin=<允許的 Web origin，如 https://shop.example.com> \
   --fido.admin.tenant.rate-limit-tps=<選填，預設 100>
 ```
+
+**多個 Web origin 的輸入語法**：一個租戶若有多個合法 Web origin（例如同時有 `https://shop.example.com` 與 `https://www.shop.example.com`），`--fido.admin.tenant.expected-origin` 可用以下任一形式帶入，CLI 會依 `tenants.expected_origin`「單一字串或 JSON 陣列字串」慣例正確落庫：
+
+```
+# 形式一：重複帶入同一參數（推薦，最直覺）
+  --fido.admin.tenant.expected-origin=https://shop.example.com \
+  --fido.admin.tenant.expected-origin=https://www.shop.example.com
+
+# 形式二：單一參數、以逗號分隔多個 origin
+  --fido.admin.tenant.expected-origin=https://shop.example.com,https://www.shop.example.com
+
+# 形式三：直接給 JSON 陣列字串（注意 shell 引號跳脫）
+  --fido.admin.tenant.expected-origin='["https://shop.example.com","https://www.shop.example.com"]'
+```
+
+（單一 origin 時直接給一個值即可，落庫為純字串。原生 App 情境的 app origin **不走**此參數，改以後續 `add-app-binding` 指令登錄，見 §6.3。）
 
 `rp_id` 唯一，重複開通會被明確擋下（不是資料庫例外堆疊）。指令會自動產生高熵 API Key，以下列規則落庫（對應 `ApiKeyService`，CLI 內部呼叫、不需人工手算）：
 
