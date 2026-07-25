@@ -101,7 +101,14 @@ public final class CrossProcessE2EManualRunner {
                     List.of("java", "-jar", fidoJar.toString(),
                             "--server.port=8443",
                             "--fido.persistence.mode=memory",
-                            "--fido.attestation.poc-trust.enabled=true"),
+                            "--fido.attestation.poc-trust.enabled=true",
+                            // fido.dev-seed.enabled 的正式建置預設值已改為 false（見 CLAUDE.md
+                            // 「租戶開通 / 簽章金鑰 CLI 決策」段落），這個 harness 靠 dev-seed 建立
+                            // shopping-site-reference 用來打 API 的示範租戶（固定 API Key，見
+                            // shopping-site-reference/src/main/resources/application.yml），
+                            // 必須明確 opt-in，否則對 fido-server 的每個代理呼叫都會因租戶不存在
+                            // 收到 401，而非依賴已改掉的舊預設值。
+                            "--fido.dev-seed.enabled=true"),
                     logDir.resolve("fido-server.log"));
 
             waitForHttp(FIDO_BASE_URL + "/actuator/health", "fido-server", 60);
