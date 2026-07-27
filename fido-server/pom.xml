@@ -42,6 +42,20 @@
         </dependency>
 
         <!--
+            內部可觀測性（CLAUDE.md「內部可觀測性 + 唯讀 list-tenants」交辦）：Prometheus 格式的
+            /actuator/prometheus 端點所需的 registry 實作。只加依賴、不直接呼叫其 API——
+            四個自訂業務指標一律經由 spring-boot-starter-actuator 自動組態提供的
+            io.micrometer.core.instrument.MeterRegistry 記錄，該 registry 會自動同時發布到本
+            registry。此端點與 health/info/metrics 一併只掛在獨立管理端口
+            （management.server.port，見 application.yml），不會出現在對外的 8443。
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
             Persistence 層（見 com.fido.server.repository.jpa.*）。fido.persistence.mode=jpa
             （預設，對齊 CLAUDE.md「獨立 SQL Server 實例」）時才會實際建立 DataSource / EntityManager
             （見 com.fido.server.config.JpaInfrastructureConfig）；mode=memory 時完全不會用到，
@@ -141,6 +155,18 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <!--
+                        產生 META-INF/build-info.properties，供 /actuator/info（管理端口）回傳
+                        build.artifact / build.name / build.version / build.time（CLAUDE.md
+                        「管理後台 / 客戶 Portal 評估拍板結果」決策 2）。
+                    -->
+                    <execution>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

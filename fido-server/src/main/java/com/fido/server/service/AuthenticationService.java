@@ -27,6 +27,7 @@ import com.fido.server.webauthn.AuthenticatorDataParser;
 import com.fido.server.webauthn.ClientData;
 import com.fido.server.webauthn.ClientDataParser;
 import com.fido.server.webauthn.WebAuthnValidationException;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -66,6 +67,7 @@ public class AuthenticationService {
     private final TransportsCodec transportsCodec;
     private final AssertionSignatureVerifier assertionSignatureVerifier;
     private final JwtService jwtService;
+    private final MeterRegistry meterRegistry;
 
     public AuthenticationService(FidoUserRefRepository fidoUserRefRepository,
                                   FidoCredentialRepository fidoCredentialRepository,
@@ -76,7 +78,8 @@ public class AuthenticationService {
                                   OriginValidator originValidator,
                                   TransportsCodec transportsCodec,
                                   AssertionSignatureVerifier assertionSignatureVerifier,
-                                  JwtService jwtService) {
+                                  JwtService jwtService,
+                                  MeterRegistry meterRegistry) {
         this.fidoUserRefRepository = fidoUserRefRepository;
         this.fidoCredentialRepository = fidoCredentialRepository;
         this.boundDeviceRepository = boundDeviceRepository;
@@ -87,6 +90,7 @@ public class AuthenticationService {
         this.transportsCodec = transportsCodec;
         this.assertionSignatureVerifier = assertionSignatureVerifier;
         this.jwtService = jwtService;
+        this.meterRegistry = meterRegistry;
     }
 
     public AuthenticationOptionsResponse createOptions(Tenant tenant, AuthenticationOptionsRequest request) {
@@ -135,6 +139,21 @@ public class AuthenticationService {
      */
     public AuthenticationResultResponse verifyResult(Tenant tenant, AuthenticationResultRequest request,
                                                        List<String> extraAmr) {
+        try {
+            return doVerifyResult(tenant, request, extraAmr);
+        } catch (ApiException e) {
+            // fido.auth.verify.failures（CLAUDE.md「內部可觀測性」交辦第 2 點）：涵蓋本方法內
+            // 任何驗證失敗出口（含 challengeService.requireValid 的 CHALLENGE_EXPIRED /
+            // CHALLENGE_NOT_FOUND），tag reason 一律取實際觸發的 ErrorCode 名稱，而非另外自訂
+            // 一套字串——與伺服器實際回應的 error.code 保持一致，排查時可直接對照。
+            meterRegistry.counter(MetricNames.AUTH_VERIFY_FAILURES,
+                    MetricNames.TAG_REASON, e.getErrorCode().name()).increment();
+            throw e;
+        }
+    }
+
+    private AuthenticationResultResponse doVerifyResult(Tenant tenant, AuthenticationResultRequest request,
+                                                          List<String> extraAmr) {
         AuthChallenge challenge = challengeService.requireValid(request.ceremonyId(), tenant, CeremonyType.AUTHENTICATION);
 
         byte[] credentialIdBytes = decodeB64Url(request.credential().id(), "credential.id");
@@ -242,6 +261,9 @@ public class AuthenticationService {
             auditService.record(tenant.getTenantId(), userRef.getUserRefId(), device.getDevicePk(),
                     "AUTO_REVOKE_COUNTER_REGRESSION", AuditOutcome.FAILURE,
                     Map.of("storedCount", storedCount, "newCount", newCount));
+            // fido.credential.auto_revocations（CLAUDE.md「內部可觀測性」交辦第 2 點）：不帶任何
+            // tag，純粹計次；credential/device 的 REVOKED 狀態已在上面落庫完成，此處只是計數。
+            meterRegistry.counter(MetricNames.CREDENTIAL_AUTO_REVOCATIONS).increment();
 
             throw new ApiException(ErrorCode.SIGN_COUNTER_REGRESSION,
                     "Sign counter regression detected; credential has been automatically revoked.");

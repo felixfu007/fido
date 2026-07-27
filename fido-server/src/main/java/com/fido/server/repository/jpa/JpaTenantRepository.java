@@ -8,8 +8,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * {@link TenantRepository} 的 JPA 實作，底層委派 {@link SpringDataTenantRepository}，並在
@@ -51,6 +53,12 @@ public class JpaTenantRepository implements TenantRepository {
     @Transactional(readOnly = true)
     public Optional<Tenant> findByRpId(String rpId) {
         return delegate.findByRpId(rpId).map(JpaTenantRepository::toDomain);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<Tenant> findAll() {
+        return delegate.findAll().stream().map(JpaTenantRepository::toDomain).collect(Collectors.toList());
     }
 
     @Override

@@ -3,9 +3,12 @@ package com.fido.server;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import com.fido.server.service.MetricNames;
 import com.fido.server.testsupport.TestKeyAttestationFixtures;
 import com.fido.server.testsupport.WebAuthnCeremonyFixtures;
 import com.fido.server.webauthn.TrustedRootCertificateStore;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -26,6 +29,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -54,6 +58,9 @@ class CrossDeviceLoginFlowTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final ObjectMapper cborMapper = new ObjectMapper(new CBORFactory());
@@ -162,6 +169,10 @@ class CrossDeviceLoginFlowTest {
                         "authenticatorData", B64URL.encodeToString(authenticatorData),
                         "signature", B64URL.encodeToString(signature)));
 
+        // fido.crossdevice.proximity_mismatch 不帶 tag（共用 registry，跨測試方法可能已有既有
+        // 計數），用執行前後差值斷言，而非絕對值（CLAUDE.md「內部可觀測性」交辦第 2 點）。
+        double proximityMismatchBefore = proximityMismatchCount();
+
         // 手機直連來源 IP（198.51.100.9）與桌機發起 IP（203.0.113.5）不同 -> 只標記，不阻擋。
         mockMvc.perform(post("/api/v1/authentication/cross-device/sessions/{id}/result", xdevId)
                         .with(remoteAddr("198.51.100.9"))
@@ -170,6 +181,8 @@ class CrossDeviceLoginFlowTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("CONFIRMED"))
                 .andExpect(jsonPath("$.proximity.mismatch").value(true));
+
+        assertThat(proximityMismatchCount()).isEqualTo(proximityMismatchBefore + 1);
 
         mockMvc.perform(get("/api/v1/authentication/cross-device/sessions/{id}/status", xdevId)
                         .header("X-API-Key", API_KEY))
@@ -403,6 +416,12 @@ class CrossDeviceLoginFlowTest {
             request.setRemoteAddr(ip);
             return request;
         };
+    }
+
+    /** {@code fido.crossdevice.proximity_mismatch} 目前值；尚無事件時 find(...).counter() 為 null，視為 0。 */
+    private double proximityMismatchCount() {
+        Counter counter = meterRegistry.find(MetricNames.CROSSDEVICE_PROXIMITY_MISMATCH).counter();
+        return counter == null ? 0.0 : counter.count();
     }
 
     private void assertAmrContainsXdev(String jwt) throws Exception {

@@ -34,11 +34,26 @@ spring:
         jdbc:
           time_zone: UTC
 
+# ---------------------------------------------------------------------------
+# Actuator：獨立管理端口（CLAUDE.md「內部可觀測性 + 唯讀 list-tenants」/「管理後台 / 客戶
+# Portal 評估拍板結果」）。/actuator/** 目前繞過 ApiKeyAuthFilter 且本專案未依賴 Spring
+# Security，若掛在對外的 server.port（8443）等於完全免認證公開 metrics/health/info——尤其
+# 情境三要求手機 App 直連 8443（不帶 X-API-Key），8443 實務上不能假設是純內網端口。故 management
+# 端口（8444）與對外 API 端口（8443）分離，讓部署層（Service/Ingress/NetworkPolicy/防火牆）可以
+# 只對外發布 8443、8444 僅開放給監控來源，達成「預設安全」而非僅靠操作手冊建議。
+#
+# 刻意【不】設 management.server.address=127.0.0.1：擁有者已確認 fido-server 未來部署在容器上、
+# 以動態調節 pod 數量水平擴充，kubelet liveness/readiness 探針打的是 pod IP 而非 loopback，綁
+# loopback 會讓健康檢查探針失效。管理端口對外的網路層隔離改由部署層（NetworkPolicy/防火牆）負責，
+# 見 docs/vendor/environment-setup-guide.md。
+# ---------------------------------------------------------------------------
 management:
+  server:
+    port: 8444
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: never

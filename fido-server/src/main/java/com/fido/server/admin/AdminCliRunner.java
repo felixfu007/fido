@@ -31,8 +31,9 @@ import java.util.stream.Collectors;
 /**
  * 平台維運方在伺服器主機本機執行的一次性管理指令，僅在 {@code admin-cli} Spring profile
  * active 時才是 bean（見 {@code application-admin-cli.yml}：{@code spring.main.web-application
- * -type=none}，不開任何網路端口）。三個子指令由 {@code --fido.admin.command=} 挑選，詳見
- * CLAUDE.md「租戶開通 / 簽章金鑰 CLI 決策」。
+ * -type=none}，不開任何網路端口）。四個子指令由 {@code --fido.admin.command=} 挑選，詳見
+ * CLAUDE.md「租戶開通 / 簽章金鑰 CLI 決策」與「內部可觀測性 + 唯讀 list-tenants」交辦
+ * （{@code list-tenants} 為後者新增，唯讀、不寫 {@code audit_log}）。
  *
  * <p>執行完畢一律呼叫 {@link System#exit(int)}：成功 0、已知錯誤（{@link AdminCliException}）
  * 非 0 且只印清楚的錯誤訊息（不印 stack trace）、真正未預期的例外印出堆疊供排查後同樣非 0
@@ -79,15 +80,17 @@ public class AdminCliRunner implements CommandLineRunner {
         try {
             if (command == null || command.isBlank()) {
                 throw new AdminCliException(
-                        "缺少 --fido.admin.command，需為 create-tenant / add-app-binding / rotate-signing-key 三者之一。");
+                        "缺少 --fido.admin.command，需為 create-tenant / add-app-binding / "
+                                + "rotate-signing-key / list-tenants 四者之一。");
             }
             exitCode = switch (command) {
                 case "create-tenant" -> runCreateTenant();
                 case "add-app-binding" -> runAddAppBinding();
                 case "rotate-signing-key" -> runRotateSigningKey();
+                case "list-tenants" -> runListTenants();
                 default -> throw new AdminCliException(
                         "未知的 --fido.admin.command='" + command
-                                + "'，需為 create-tenant / add-app-binding / rotate-signing-key 三者之一。");
+                                + "'，需為 create-tenant / add-app-binding / rotate-signing-key / list-tenants 四者之一。");
             };
         } catch (AdminCliException knownError) {
             System.err.println("[admin-cli] 錯誤：" + knownError.getMessage());
@@ -240,6 +243,41 @@ public class AdminCliRunner implements CommandLineRunner {
         System.out.println();
         System.out.println("提醒：因 session JWT 僅 120 秒效期，JWKS 端點會同時發布 ACTIVE+RETIRED 公鑰，");
         System.out.println("過渡期內舊 kid 簽出、尚未過期的 JWT 仍可正常驗簽，無需額外處理。");
+        System.out.println(divider);
+        return 0;
+    }
+
+    // -------------------------------------------------------------------
+    // list-tenants
+    // -------------------------------------------------------------------
+
+    /**
+     * 唯讀指令，無其他必填參數（CLAUDE.md「內部可觀測性 + 唯讀 list-tenants」交辦第 3 點）。
+     * 輸出欄位刻意限定為 {@code tenant_uid}/{@code name}/{@code rp_id}/{@code status}/
+     * {@code rate_limit_tps}/{@code expected_origin}——**嚴禁**印 {@code api_key_hash} 或
+     * {@code api_key_prefix}（維持擁有者指定的欄位集）。唯讀操作**不**寫 {@code audit_log}
+     * （既有慣例只對狀態變更操作寫稽核，且本指令只能在有主機權限者手上執行）。
+     */
+    int runListTenants() {
+        List<Tenant> tenants = tenantRepository.findAll();
+
+        String divider = "=".repeat(80);
+        System.out.println(divider);
+        System.out.println("租戶清單（共 " + tenants.size() + " 筆）");
+        System.out.println(divider);
+        if (tenants.isEmpty()) {
+            System.out.println("（目前沒有任何租戶）");
+        } else {
+            for (Tenant tenant : tenants) {
+                System.out.println("tenant_uid      : " + tenant.getTenantUid());
+                System.out.println("name            : " + tenant.getName());
+                System.out.println("rp_id           : " + tenant.getRpId());
+                System.out.println("status          : " + tenant.getStatus());
+                System.out.println("rate_limit_tps  : " + tenant.getRateLimitTps());
+                System.out.println("expected_origin : " + tenant.getExpectedOrigin());
+                System.out.println("-".repeat(80));
+            }
+        }
         System.out.println(divider);
         return 0;
     }

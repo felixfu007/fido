@@ -2,6 +2,7 @@ package com.fido.server.repository;
 
 import com.fido.server.domain.Tenant;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -23,6 +24,13 @@ public interface TenantRepository {
     Optional<Tenant> findByApiKeyHash(byte[] apiKeyHash);
 
     Optional<Tenant> findByRpId(String rpId);
+
+    /**
+     * 供 admin CLI 唯讀 {@code list-tenants} 指令使用（CLAUDE.md「內部可觀測性 + 唯讀
+     * list-tenants」交辦第 3 點）。回傳全部租戶，不分頁——租戶數量規模（平台簽約的採用廠商
+     * 家數）遠低於會員/裝置規模，不需要分頁。
+     */
+    List<Tenant> findAll();
 
     Tenant save(Tenant tenant);
 }

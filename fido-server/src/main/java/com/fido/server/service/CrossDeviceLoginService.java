@@ -28,6 +28,7 @@ import com.fido.server.repository.BoundDeviceRepository;
 import com.fido.server.repository.CrossDeviceSessionRepository;
 import com.fido.server.repository.FidoCredentialRepository;
 import com.fido.server.repository.TenantRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 
 import java.security.MessageDigest;
@@ -80,6 +81,7 @@ public class CrossDeviceLoginService {
     private final BoundDeviceRepository boundDeviceRepository;
     private final AuditService auditService;
     private final ObjectMapper objectMapper;
+    private final MeterRegistry meterRegistry;
 
     public CrossDeviceLoginService(FidoProperties properties,
                                     ChallengeService challengeService,
@@ -90,7 +92,8 @@ public class CrossDeviceLoginService {
                                     FidoCredentialRepository fidoCredentialRepository,
                                     BoundDeviceRepository boundDeviceRepository,
                                     AuditService auditService,
-                                    ObjectMapper objectMapper) {
+                                    ObjectMapper objectMapper,
+                                    MeterRegistry meterRegistry) {
         this.properties = properties;
         this.challengeService = challengeService;
         this.authChallengeRepository = authChallengeRepository;
@@ -101,6 +104,7 @@ public class CrossDeviceLoginService {
         this.boundDeviceRepository = boundDeviceRepository;
         this.auditService = auditService;
         this.objectMapper = objectMapper;
+        this.meterRegistry = meterRegistry;
     }
 
     /** 端點 A：{@code POST /api/v1/authentication/cross-device/sessions}（購物網站後端）。 */
@@ -183,6 +187,12 @@ public class CrossDeviceLoginService {
         AuthenticationResultResponse result = authenticationService.verifyResult(tenant, wrapped, List.of("xdev"));
 
         boolean proximityMismatch = !matchesProximity(session.getDesktopIp(), phoneIp);
+        if (proximityMismatch) {
+            // fido.crossdevice.proximity_mismatch（CLAUDE.md「內部可觀測性」交辦第 2 點）：不帶
+            // 任何 tag（尤其不得帶 IP/xdevId）。S2 warn-only 下這是唯一的量化訊號來源之一，供
+            // 維護手冊第 11 節建議的監控告警使用。
+            meterRegistry.counter(MetricNames.CROSSDEVICE_PROXIMITY_MISMATCH).increment();
+        }
 
         byte[] credentialIdSha256 = sha256(B64URL_DEC.decode(result.credentialId()));
         FidoCredential credential = fidoCredentialRepository

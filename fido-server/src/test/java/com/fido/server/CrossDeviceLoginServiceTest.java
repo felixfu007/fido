@@ -29,6 +29,9 @@ import com.fido.server.service.AuditService;
 import com.fido.server.service.AuthenticationService;
 import com.fido.server.service.ChallengeService;
 import com.fido.server.service.CrossDeviceLoginService;
+import com.fido.server.service.MetricNames;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -71,6 +74,7 @@ class CrossDeviceLoginServiceTest {
     private FidoCredentialRepository fidoCredentialRepository;
     private BoundDeviceRepository boundDeviceRepository;
     private AuditService auditService;
+    private MeterRegistry meterRegistry;
     private CrossDeviceLoginService service;
 
     private Tenant tenant;
@@ -89,10 +93,13 @@ class CrossDeviceLoginServiceTest {
         fidoCredentialRepository = mock(FidoCredentialRepository.class);
         boundDeviceRepository = mock(BoundDeviceRepository.class);
         auditService = mock(AuditService.class);
+        // 真正的 registry（非 mock）：本測試檔額外驗證 fido.crossdevice.proximity_mismatch
+        // 真的被記錄，用 mock 的話無法斷言「呼叫了正確的 counter name/increment」以外的語意。
+        meterRegistry = new SimpleMeterRegistry();
 
         service = new CrossDeviceLoginService(properties, challengeService, authChallengeRepository,
                 crossDeviceSessionRepository, tenantRepository, authenticationService, fidoCredentialRepository,
-                boundDeviceRepository, auditService, new ObjectMapper());
+                boundDeviceRepository, auditService, new ObjectMapper(), meterRegistry);
 
         tenant = new Tenant();
         tenant.setTenantId(1L);
@@ -267,6 +274,8 @@ class CrossDeviceLoginServiceTest {
         assertThat(session.getIssuedJwt()).isNotBlank();
 
         verify(auditService).record(eq(1L), eq(55L), eq(77L), eq("XDEV_CONFIRMED"), any(), anyMap());
+        // proximity 相符：fido.crossdevice.proximity_mismatch 不應被記錄。
+        assertThat(meterRegistry.find(MetricNames.CROSSDEVICE_PROXIMITY_MISMATCH).counter()).isNull();
     }
 
     @Test
@@ -281,6 +290,11 @@ class CrossDeviceLoginServiceTest {
         assertThat(response.status()).isEqualTo("CONFIRMED");
         assertThat(response.proximity().mismatch()).isTrue();
         assertThat(session.getProximityMismatch()).isTrue();
+
+        // fido.crossdevice.proximity_mismatch：+1、不帶任何 tag（標籤硬規則，尤其不得帶 IP）。
+        assertThat(meterRegistry.find(MetricNames.CROSSDEVICE_PROXIMITY_MISMATCH).counter().count()).isEqualTo(1.0);
+        assertThat(meterRegistry.find(MetricNames.CROSSDEVICE_PROXIMITY_MISMATCH).counter().getId().getTags())
+                .isEmpty();
     }
 
     // ------------------------------------------------------------------

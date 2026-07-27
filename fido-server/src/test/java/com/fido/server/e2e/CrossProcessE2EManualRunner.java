@@ -50,13 +50,37 @@ import java.util.concurrent.TimeUnit;
  */
 public final class CrossProcessE2EManualRunner {
 
-    private static final String FIDO_BASE_URL = "http://localhost:8443";
+    // fido-server 對外 API 端口（8443）本身在本 harness 內一律透過 shopping-site-reference
+    // 的代理呼叫（SHOP_BASE_URL），不直接打；此常數只留給啟動存活探測用管理端口參照。
+    //
+    // Actuator（health/info/metrics/prometheus）自 CLAUDE.md「內部可觀測性 + 唯讀
+    // list-tenants」交辦第 1 點起，已從對外的 8443 移到獨立管理端口 8444（application.yml
+    // 的 management.server.port），避免 /actuator/** 在沒有 Spring Security、且
+    // ApiKeyAuthFilter 把 "/actuator" 列為公開前綴的情況下，於對外可達的 8443 完全免認證公開。
+    // 存活探測改打這個管理端口，明確以 --management.server.port=8444 帶入（雖然目前也是
+    // application.yml 的預設值，但 harness 顯式帶入以避免未來預設值變動時悄悄失效）。
+    private static final String FIDO_MGMT_BASE_URL = "http://localhost:8444";
     // 8081 在本機開發環境上已被另一個無關服務（macmnsvc.exe）長期佔用（LISTENING），
     // 改用 18081 避免撞埠；shopping-site-reference 的 fido-client.base-url 預設指向
     // fido-server 的 8443，與此埠無關，不受影響。
     private static final String SHOP_BASE_URL = "http://localhost:18081";
     private static final String RP_ID = "shop.example.com";
     private static final String ORIGIN = "https://shop.example.com";
+
+    // ---- 情境三（跨裝置 QR 登入）用：手機 App 對 §3.4 端點 B/C/E 是直連 fido-server（不透過
+    // shopping-site-reference 代理、不帶 X-API-Key，見 CLAUDE.md「情境三」與 api-contract.md
+    // §1.2.2 / D16），因此本 harness 對這三個端點必須直打 8443；端點 A/D 仍是購物網站後端職責，
+    // 一部分流程改走 shopping-site-reference 的 crossdevice 代理（驗證真正的 SHOP_SESSION/
+    // step-up 行為），另一部分（見 runCrossDeviceAmrDecodeFlow）為了能獨立解出 JWT payload
+    // 自行驗證 amr 含 "xdev"（shopping-site-reference 的 poll 端點刻意不把 xdevId/JWT 暴露給
+    // 前端，見 CrossDeviceStartResponseDto/CrossDevicePollResponseDto Javadoc），改成完全直連
+    // fido-server 跑一次獨立的 A→B→C→D，不經過購物網站，純粹用來對外驗證合約本身回傳的 JWT
+    // 內容，不需要、也没有更動任何 production 程式碼。
+    private static final String FIDO_API_BASE_URL = "http://localhost:8443";
+    // 與 shopping-site-reference/src/main/resources/application.yml 的 fido-client.api-key
+    // 完全一致（= fido-server dev-seed 種子租戶的固定明碼 API Key，見 fido-server/src/main/
+    // resources/application.yml 的 fido.dev-seed.api-key），僅供本機/CI dev-seed 情境使用。
+    private static final String FIDO_DEV_API_KEY = "dev-api-key-00000000000000000000";
 
     private static final Base64.Encoder B64URL = Base64.getUrlEncoder().withoutPadding();
     private static final Base64.Decoder B64URL_DEC = Base64.getUrlDecoder();
@@ -100,6 +124,7 @@ public final class CrossProcessE2EManualRunner {
             fidoProcess = startProcess("fido-server", fidoDir,
                     List.of("java", "-jar", fidoJar.toString(),
                             "--server.port=8443",
+                            "--management.server.port=8444",
                             "--fido.persistence.mode=memory",
                             "--fido.attestation.poc-trust.enabled=true",
                             // fido.dev-seed.enabled 的正式建置預設值已改為 false（見 CLAUDE.md
@@ -111,8 +136,9 @@ public final class CrossProcessE2EManualRunner {
                             "--fido.dev-seed.enabled=true"),
                     logDir.resolve("fido-server.log"));
 
-            waitForHttp(FIDO_BASE_URL + "/actuator/health", "fido-server", 60);
-            record("fido-server 行程真的啟動並可透過 HTTP 存活探測（/actuator/health）", true, false);
+            waitForHttp(FIDO_MGMT_BASE_URL + "/actuator/health", "fido-server", 60);
+            record("fido-server 行程真的啟動並可透過 HTTP 存活探測（管理端口 8444 的 /actuator/health）",
+                    true, false);
 
             shopProcess = startProcess("shopping-site-reference", shopDir,
                     List.of("java", "-jar", shopJar.toString(),
@@ -382,6 +408,390 @@ public final class CrossProcessE2EManualRunner {
                 && anyDeviceIdMatches(deviceListAfterRevokeJson.get("devices"), deviceId, "REVOKED");
         record("撤銷後 status=ALL 裝置列表可見該裝置狀態變為 REVOKED（跨行程真實查詢，非快取值）",
                 revokedVisibleInAll, false, deviceListAfterRevokeResp.statusCode(), deviceListAfterRevokeResp.body());
+
+        // =====================================================================
+        // 情境三：桌機 QR 掃碼跨裝置登入（cross-device QR login），見 CLAUDE.md「桌機 QR 掃碼
+        // 跨裝置登入（情境三）決策定案」與 docs/api-contract.md §3.4。上面的同裝置流程已把
+        // 唯一一台裝置撤銷，這裡另外註冊一台新裝置專供跨裝置流程使用。
+        // =====================================================================
+        runCrossDeviceFlows(http, csrfHeader, externalUserId);
+    }
+
+    /**
+     * 情境三（跨裝置 QR 登入）三段流程：
+     * <ol>
+     *   <li>{@link #runCrossDeviceAmrDecodeFlow}：完全直連 fido-server 的 A→B→C→D（不經過
+     *       shopping-site-reference），純粹用來獨立解出 fido-server 簽發的 session JWT payload，
+     *       驗證 {@code amr} 含 {@code "xdev"}（api-contract.md §1.3 / D17）。之所以不透過
+     *       shopping-site-reference 代理驗證這件事，是因為 {@code CrossDeviceAuthenticationProxyController#poll}
+     *       刻意不把原始 JWT 或 xdevId 回傳給呼叫端（見 {@code CrossDeviceStartResponseDto}/
+     *       {@code CrossDevicePollResponseDto} Javadoc：poll cookie 機制 + 只回
+     *       {@code status}/{@code externalUserId}），沒有生產程式碼路徑可以讓外部呼叫端拿到
+     *       原始 JWT 自行檢查 claims——這是刻意的安全設計（JWT 是一次性 bearer，不該被回傳給
+     *       前端 JS），不應為了測試方便而更動。故本 harness 改用「直接呼叫 fido-server 端拿到
+     *       原始 JWT 自行解碼 payload 確認」這個任務說明允許的替代做法，不改動任何 production
+     *       程式碼。</li>
+     *   <li>{@link #runCrossDeviceShopLoginFlow}：端點 A/D 透過 shopping-site-reference 代理、
+     *       端點 B/C 手機端直連 fido-server（並刻意帶一個與桌機端 IP 不一致的來源，驗證 proximity
+     *       warn-only），驗證真的能建立 SHOP_SESSION、且該 session 對敏感操作（撤銷裝置）會被
+     *       要求 step-up（403 STEP_UP_REQUIRED），不是直接放行。</li>
+     *   <li>{@link #runCrossDeviceDenyFlow}：端點 E（deny）路徑，手機端模擬「使用者取消」，
+     *       驗證桌機端輪詢會看到 {@code DENIED} 且沒有核發 JWT/建立 session。</li>
+     * </ol>
+     */
+    private static void runCrossDeviceFlows(HttpClient http, Map<String, String> csrfHeader, String externalUserId)
+            throws Exception {
+        CrossDeviceTestCredential credential = registerCrossDeviceCredential(http, csrfHeader, externalUserId);
+        if (credential == null) {
+            return;
+        }
+
+        runCrossDeviceAmrDecodeFlow(http, credential);
+        runCrossDeviceShopLoginFlow(http, csrfHeader, externalUserId, credential);
+        runCrossDeviceDenyFlow(http, csrfHeader);
+    }
+
+    /**
+     * 註冊一台新裝置專供情境三流程使用（同裝置流程原本註冊的那台已在上面被撤銷）。與主流程
+     * 註冊步驟（見 {@code runFlows} 開頭）邏輯完全相同，抽出成獨立方法只是為了讓情境三這段
+     * 自成一體、方便閱讀。
+     */
+    private static CrossDeviceTestCredential registerCrossDeviceCredential(
+            HttpClient http, Map<String, String> csrfHeader, String externalUserId) throws Exception {
+        HttpResponse<String> regOptionsResp = postJson(http, SHOP_BASE_URL + "/shop/api/fido/registration/options",
+                Map.of("externalUserId", externalUserId, "displayName", "E2E XDev User", "deviceLabel", "E2E XDev Device"),
+                csrfHeader);
+        boolean regOptionsOk = regOptionsResp.statusCode() == 200;
+        record("[情境三] 註冊 options：為跨裝置流程另外註冊一台新裝置（POST /shop/api/fido/registration/options）",
+                regOptionsOk, true, regOptionsResp.statusCode(), regOptionsResp.body());
+        if (!regOptionsOk) {
+            return null;
+        }
+
+        JsonNode regOptionsJson = JSON.readTree(regOptionsResp.body());
+        String regCeremonyId = regOptionsJson.get("ceremonyId").asText();
+        String regChallengeB64 = regOptionsJson.get("publicKey").get("challenge").asText();
+
+        KeyPair credentialKeyPair = WebAuthnCeremonyFixtures.generateEcKeyPair();
+        byte[] credentialId = WebAuthnCeremonyFixtures.randomBytes(32);
+        byte[] coseKeyBytes = WebAuthnCeremonyFixtures.buildEcCoseKeyBytes(CBOR, (ECPublicKey) credentialKeyPair.getPublic());
+        byte[] authenticatorData = WebAuthnCeremonyFixtures.buildAuthenticatorData(RP_ID, (byte) 0x41, 0L,
+                new byte[16], credentialId, coseKeyBytes);
+        byte[] clientDataJson = WebAuthnCeremonyFixtures.buildClientDataJson(JSON, "webauthn.create", regChallengeB64, ORIGIN);
+        byte[] clientDataHash = WebAuthnCeremonyFixtures.sha256(clientDataJson);
+
+        byte[] challengeBytes = B64URL_DEC.decode(regChallengeB64);
+        var leafCert = TestKeyAttestationFixtures.buildLeafCertificate(
+                credentialKeyPair.getPublic(), TestKeyAttestationFixtures.SECURITY_LEVEL_STRONG_BOX, challengeBytes);
+        byte[] attStmtSig = WebAuthnCeremonyFixtures.signEcdsa(credentialKeyPair.getPrivate(), authenticatorData, clientDataHash);
+        byte[] attestationObject = WebAuthnCeremonyFixtures.buildAttestationObject(CBOR, "android-key", authenticatorData, attStmtSig, leafCert);
+
+        Map<String, Object> credentialJson = Map.of(
+                "id", B64URL.encodeToString(credentialId),
+                "rawId", B64URL.encodeToString(credentialId),
+                "type", "public-key",
+                "response", Map.of(
+                        "clientDataJSON", B64URL.encodeToString(clientDataJson),
+                        "attestationObject", B64URL.encodeToString(attestationObject),
+                        "transports", List.of("internal")));
+
+        Map<String, Object> regResultBody = new LinkedHashMap<>();
+        regResultBody.put("ceremonyId", regCeremonyId);
+        regResultBody.put("externalUserId", externalUserId);
+        regResultBody.put("credential", credentialJson);
+        regResultBody.put("deviceLabel", "E2E XDev Device");
+
+        HttpResponse<String> regResultResp = postJson(http, SHOP_BASE_URL + "/shop/api/fido/registration/result",
+                regResultBody, csrfHeader);
+        boolean regResultOk = regResultResp.statusCode() == 201;
+        record("[情境三] 註冊 result：跨裝置流程專用裝置真實 attestation 送驗通過（POST /shop/api/fido/registration/result -> 201）",
+                regResultOk, true, regResultResp.statusCode(), regResultResp.body());
+        if (!regResultOk) {
+            return null;
+        }
+        JsonNode regResultJson = JSON.readTree(regResultResp.body());
+        String deviceId = regResultJson.get("deviceId").asText();
+        return new CrossDeviceTestCredential(credentialKeyPair, credentialId, deviceId);
+    }
+
+    /**
+     * 完全直連 fido-server 的 A→B→C→D（不經過 shopping-site-reference），純粹用來獨立解出
+     * session JWT payload 驗證 {@code amr} 含 {@code "xdev"}（理由見 {@link #runCrossDeviceFlows}
+     * Javadoc 第 1 點）。同時也是「手機 App 直連 fido-server、以 xdevId capability 認證、不帶
+     * X-API-Key」這條合約路徑本身的直接驗證（api-contract.md §1.2.2 / D16）。
+     */
+    private static void runCrossDeviceAmrDecodeFlow(HttpClient http, CrossDeviceTestCredential credential)
+            throws Exception {
+        Map<String, String> apiKeyHeader = Map.of("X-API-Key", FIDO_DEV_API_KEY);
+
+        HttpResponse<String> createResp = postJson(http,
+                FIDO_API_BASE_URL + "/api/v1/authentication/cross-device/sessions",
+                Map.of("desktopClientIp", "198.51.100.10"), apiKeyHeader);
+        boolean createOk = createResp.statusCode() == 200;
+        record("[情境三/amr 解碼流程] 端點 A：直連 fido-server 建立 cross-device session"
+                        + "（POST /api/v1/authentication/cross-device/sessions，X-API-Key，桌機 IP=198.51.100.10）",
+                createOk, true, createResp.statusCode(), createResp.body());
+        if (!createOk) {
+            return;
+        }
+        JsonNode createJson = JSON.readTree(createResp.body());
+        String xdevId = createJson.get("xdevId").asText();
+        String qrUrl = createJson.get("qrUrl").asText();
+        boolean qrUrlEncodesXdevId = qrUrl != null && qrUrl.endsWith("/x/" + xdevId);
+        record("[情境三/amr 解碼流程] qrUrl 只承載不透明 xdevId（qrUrl 以 /x/<xdevId> 結尾，不含 rpId/challenge/使用者資訊）",
+                qrUrlEncodesXdevId, false, null, qrUrl);
+
+        HttpResponse<String> claimResp = postJson(http,
+                FIDO_API_BASE_URL + "/api/v1/authentication/cross-device/sessions/" + xdevId + "/claim",
+                Map.of(), Map.of());
+        boolean claimOk = claimResp.statusCode() == 200;
+        record("[情境三/amr 解碼流程] 端點 B：模擬手機直連 claim（不帶 X-API-Key，以 xdevId capability 認證）"
+                        + "（POST .../sessions/{xdevId}/claim -> 200，PENDING→SCANNED）",
+                claimOk, true, claimResp.statusCode(), claimResp.body());
+        if (!claimOk) {
+            return;
+        }
+        JsonNode claimJson = JSON.readTree(claimResp.body());
+        String claimedRpId = claimJson.get("rpId").asText();
+        String claimedOrigin = claimJson.get("origin").asText();
+        String claimedChallengeB64 = claimJson.get("challenge").asText();
+        boolean claimContextAuthoritative = RP_ID.equals(claimedRpId) && ORIGIN.equals(claimedOrigin);
+        record("[情境三/amr 解碼流程] claim 回應的 rpId/origin 由伺服器依 xdevId→tenant 權威給定，與租戶設定相符"
+                        + "（rpId=" + claimedRpId + ", origin=" + claimedOrigin + "）",
+                claimContextAuthoritative, false, claimResp.statusCode(), claimResp.body());
+
+        Map<String, Object> resultBody = buildCrossDeviceAssertionBody(
+                credential.keyPair(), credential.credentialId(), claimedRpId, claimedOrigin, claimedChallengeB64, 1L);
+        HttpResponse<String> resultResp = postJson(http,
+                FIDO_API_BASE_URL + "/api/v1/authentication/cross-device/sessions/" + xdevId + "/result",
+                resultBody, Map.of());
+        boolean resultOk = resultResp.statusCode() == 200;
+        record("[情境三/amr 解碼流程] 端點 C：模擬手機直連提交真實 assertion 簽章（重用 AuthenticationService.verifyResult）"
+                        + "（POST .../sessions/{xdevId}/result -> 200，SCANNED→CONFIRMED）",
+                resultOk, true, resultResp.statusCode(), resultResp.body());
+        if (!resultOk) {
+            return;
+        }
+
+        HttpResponse<String> statusResp = getJson(http,
+                FIDO_API_BASE_URL + "/api/v1/authentication/cross-device/sessions/" + xdevId + "/status", apiKeyHeader);
+        boolean statusOk = statusResp.statusCode() == 200;
+        record("[情境三/amr 解碼流程] 端點 D：直連 fido-server 輪詢領取 JWT（不經過 shopping-site-reference）"
+                        + "（GET .../sessions/{xdevId}/status -> 200，CONFIRMED→CONSUMED）",
+                statusOk, true, statusResp.statusCode(), statusResp.body());
+        if (!statusOk) {
+            return;
+        }
+        JsonNode statusJson = JSON.readTree(statusResp.body());
+        String token = statusJson.path("session").path("token").asText(null);
+        boolean tokenPresent = token != null && !token.isBlank();
+        record("[情境三/amr 解碼流程] 端點 D 回應內含 session.token（原始 JWT 字串）", tokenPresent, true);
+        if (!tokenPresent) {
+            return;
+        }
+
+        JsonNode payload = decodeJwtPayloadUnverified(token);
+        List<String> amr = new ArrayList<>();
+        if (payload.has("amr") && payload.get("amr").isArray()) {
+            payload.get("amr").forEach(node -> amr.add(node.asText()));
+        }
+        boolean amrHasXdev = amr.contains("xdev") && amr.contains("fido") && amr.contains("hwk");
+        record("[情境三/amr 解碼流程] fido-server 簽發的 session JWT，其 amr claim 含 \"xdev\""
+                        + "（api-contract.md §1.3 / D17，本 harness 直接 base64url 解碼 JWT payload 自行檢查，"
+                        + "不信任任何回應布林欄位）：amr=" + amr,
+                amrHasXdev, true, statusResp.statusCode(), "amr=" + amr);
+    }
+
+    /**
+     * 端點 A/D 透過 shopping-site-reference 代理、端點 B/C 手機端直連 fido-server，驗證真的能建立
+     * SHOP_SESSION（{@code loggedIn} 等價：poll 回 {@code CONFIRMED} 且帶 {@code externalUserId}），
+     * 且該 session 對敏感操作（撤銷裝置）會被要求 step-up、不是直接放行。刻意讓端點 C 的來源 IP
+     * （{@code X-Forwarded-For}）與端點 A 轉發的桌機 IP 不同，驗證 proximity 不符時是「只警示不
+     * 阻擋」（S2）而非被拒絕。
+     */
+    private static void runCrossDeviceShopLoginFlow(HttpClient http, Map<String, String> csrfHeader,
+                                                       String externalUserId, CrossDeviceTestCredential credential)
+            throws Exception {
+        HttpResponse<String> startResp = postJson(http,
+                SHOP_BASE_URL + "/shop/api/fido/authentication/cross-device/start", Map.of(), csrfHeader);
+        boolean startOk = startResp.statusCode() == 200;
+        record("[情境三/購物網站登入流程] 端點 A：透過 shopping-site-reference 代理建立 cross-device session"
+                        + "（POST /shop/api/fido/authentication/cross-device/start，桌機 IP 由購物網站後端自行轉發）",
+                startOk, true, startResp.statusCode(), startResp.body());
+        if (!startOk) {
+            return;
+        }
+        JsonNode startJson = JSON.readTree(startResp.body());
+        String qrUrl = startJson.get("qrUrl").asText();
+        boolean noXdevIdLeak = !startJson.has("xdevId");
+        record("[情境三/購物網站登入流程] 代理回應刻意不含 xdevId（只透過 httpOnly XDEV_POLL cookie 傳遞，"
+                        + "避免前端 JS 讀得到能力憑證），故從 qrUrl 解析",
+                noXdevIdLeak, false, startResp.statusCode(), startResp.body());
+        String xdevId = extractXdevIdFromQrUrl(qrUrl);
+
+        HttpResponse<String> claimResp = postJson(http,
+                FIDO_API_BASE_URL + "/api/v1/authentication/cross-device/sessions/" + xdevId + "/claim",
+                Map.of(), Map.of());
+        boolean claimOk = claimResp.statusCode() == 200;
+        record("[情境三/購物網站登入流程] 端點 B：模擬手機直連 claim（POST .../sessions/{xdevId}/claim -> 200）",
+                claimOk, true, claimResp.statusCode(), claimResp.body());
+        if (!claimOk) {
+            return;
+        }
+        JsonNode claimJson = JSON.readTree(claimResp.body());
+        String claimedRpId = claimJson.get("rpId").asText();
+        String claimedOrigin = claimJson.get("origin").asText();
+        String claimedChallengeB64 = claimJson.get("challenge").asText();
+
+        Map<String, Object> resultBody = buildCrossDeviceAssertionBody(
+                credential.keyPair(), credential.credentialId(), claimedRpId, claimedOrigin, claimedChallengeB64, 2L);
+        // 刻意帶一個與端點 A 轉發的桌機 IP（購物網站後端自己所在主機的 loopback 位址）明顯不同的
+        // 手機來源 IP，觸發 proximity 不符（S2：只警示不阻擋）。
+        HttpResponse<String> resultResp = postJson(http,
+                FIDO_API_BASE_URL + "/api/v1/authentication/cross-device/sessions/" + xdevId + "/result",
+                resultBody, Map.of("X-Forwarded-For", "203.0.113.22"));
+        boolean resultOk = resultResp.statusCode() == 200;
+        record("[情境三/購物網站登入流程] 端點 C：模擬手機直連提交 assertion，來源 IP（203.0.113.22）"
+                        + "刻意與桌機端不一致（POST .../sessions/{xdevId}/result -> 200）",
+                resultOk, true, resultResp.statusCode(), resultResp.body());
+        if (!resultOk) {
+            return;
+        }
+        JsonNode resultJson = JSON.readTree(resultResp.body());
+        boolean proximityMismatchReported = resultJson.path("proximity").path("mismatch").asBoolean(false);
+        record("[情境三/購物網站登入流程] proximity 不符只在回應中標記警示欄位、不阻擋登入（S2 warn-only）："
+                        + "proximity.mismatch=true 且端點 C 仍回 200/CONFIRMED（非 409/403 被拒絕）",
+                proximityMismatchReported && resultOk, true, resultResp.statusCode(), resultResp.body());
+
+        HttpResponse<String> pollResp = getJson(http,
+                SHOP_BASE_URL + "/shop/api/fido/authentication/cross-device/poll", Map.of());
+        boolean pollOk = pollResp.statusCode() == 200;
+        JsonNode pollJson = pollOk ? JSON.readTree(pollResp.body()) : null;
+        boolean pollConfirmed = pollJson != null && "CONFIRMED".equals(pollJson.path("status").asText(null))
+                && externalUserId.equals(pollJson.path("externalUserId").asText(null));
+        record("[情境三/購物網站登入流程] 端點 D：透過 shopping-site-reference 代理輪詢，"
+                        + "真的拿到 CONFIRMED 並完成 JWT 驗簽、建立 SHOP_SESSION（GET /shop/api/fido/authentication/cross-device/poll）",
+                pollConfirmed, true, pollResp.statusCode(), pollResp.body());
+        if (!pollConfirmed) {
+            return;
+        }
+
+        HttpResponse<String> deviceListResp = getJson(http,
+                SHOP_BASE_URL + "/shop/api/fido/devices?status=ACTIVE", Map.of());
+        JsonNode deviceListJson = deviceListResp.statusCode() == 200 ? JSON.readTree(deviceListResp.body()) : null;
+        boolean deviceListedViaXdevSession = deviceListJson != null
+                && anyDeviceIdMatches(deviceListJson.get("devices"), credential.deviceId(), "ACTIVE");
+        record("[情境三/購物網站登入流程] 跨裝置登入建立的 SHOP_SESSION 真的可用：憑此 session 查裝置列表查得到"
+                        + "剛才用來完成跨裝置登入的裝置（GET /shop/api/fido/devices?status=ACTIVE）",
+                deviceListedViaXdevSession, true, deviceListResp.statusCode(), deviceListResp.body());
+
+        // ---- step-up：跨裝置 QR 登入的 session（amr 含 xdev）對敏感操作（撤銷裝置）應被要求
+        //      同裝置重新驗證，不可直接放行（api-contract.md §1.3 / D17，
+        //      shop.reference.device.DeviceProxyController#revoke / StepUpRequiredException）。----
+        HttpResponse<String> stepUpRevokeResp = deleteJson(http,
+                SHOP_BASE_URL + "/shop/api/fido/devices/" + credential.deviceId(), csrfHeader);
+        JsonNode stepUpJson = stepUpRevokeResp.body() != null && !stepUpRevokeResp.body().isBlank()
+                ? tryParseJson(stepUpRevokeResp.body()) : null;
+        boolean stepUpEnforced = stepUpRevokeResp.statusCode() == 403
+                && stepUpJson != null && "STEP_UP_REQUIRED".equals(stepUpJson.path("error").path("code").asText(null));
+        record("[情境三/購物網站登入流程] step-up 授權示範：用跨裝置 QR 登入建立的 session（amr 含 xdev）"
+                        + "嘗試撤銷裝置（敏感操作），應被拒絕要求同裝置重新驗證，而非直接放行"
+                        + "（DELETE /shop/api/fido/devices/{id} -> 403 STEP_UP_REQUIRED）",
+                stepUpEnforced, true, stepUpRevokeResp.statusCode(), stepUpRevokeResp.body());
+    }
+
+    /**
+     * 端點 E（deny）：模擬手機端在確認畫面按「不是我，取消」，驗證桌機端輪詢會看到 {@code DENIED}
+     * 且沒有核發 JWT / 建立任何新 session（api-contract.md §3.4.E）。用另一個獨立的 cross-device
+     * session，不影響前面兩段流程已建立的 SHOP_SESSION。
+     */
+    private static void runCrossDeviceDenyFlow(HttpClient http, Map<String, String> csrfHeader) throws Exception {
+        HttpResponse<String> startResp = postJson(http,
+                SHOP_BASE_URL + "/shop/api/fido/authentication/cross-device/start", Map.of(), csrfHeader);
+        boolean startOk = startResp.statusCode() == 200;
+        record("[情境三/deny 流程] 端點 A：透過 shopping-site-reference 代理建立另一個獨立的 cross-device session"
+                        + "（POST /shop/api/fido/authentication/cross-device/start）",
+                startOk, true, startResp.statusCode(), startResp.body());
+        if (!startOk) {
+            return;
+        }
+        JsonNode startJson = JSON.readTree(startResp.body());
+        String xdevId = extractXdevIdFromQrUrl(startJson.get("qrUrl").asText());
+
+        HttpResponse<String> claimResp = postJson(http,
+                FIDO_API_BASE_URL + "/api/v1/authentication/cross-device/sessions/" + xdevId + "/claim",
+                Map.of(), Map.of());
+        boolean claimOk = claimResp.statusCode() == 200;
+        record("[情境三/deny 流程] 端點 B：模擬手機直連 claim（先掃碼看到確認畫面，PENDING→SCANNED）",
+                claimOk, true, claimResp.statusCode(), claimResp.body());
+        if (!claimOk) {
+            return;
+        }
+
+        HttpResponse<String> denyResp = postJson(http,
+                FIDO_API_BASE_URL + "/api/v1/authentication/cross-device/sessions/" + xdevId + "/deny",
+                Map.of("reason", "USER_CANCELLED"), Map.of());
+        boolean denyOk = denyResp.statusCode() == 200;
+        JsonNode denyJson = denyOk ? JSON.readTree(denyResp.body()) : null;
+        boolean denyStatusCorrect = denyJson != null && "DENIED".equals(denyJson.path("status").asText(null));
+        record("[情境三/deny 流程] 端點 E：模擬使用者在確認畫面按「不是我，取消」（reason=USER_CANCELLED），"
+                        + "SCANNED→DENIED（POST .../sessions/{xdevId}/deny -> 200 status=DENIED）",
+                denyOk && denyStatusCorrect, true, denyResp.statusCode(), denyResp.body());
+
+        HttpResponse<String> pollResp = getJson(http,
+                SHOP_BASE_URL + "/shop/api/fido/authentication/cross-device/poll", Map.of());
+        boolean pollOk = pollResp.statusCode() == 200;
+        JsonNode pollJson = pollOk ? JSON.readTree(pollResp.body()) : null;
+        boolean pollDenied = pollJson != null && "DENIED".equals(pollJson.path("status").asText(null))
+                && !pollJson.has("session");
+        record("[情境三/deny 流程] 桌機端輪詢（透過 shopping-site-reference 代理）看到 DENIED、"
+                        + "且回應內沒有任何 session/token 欄位（沒有核發 JWT，未建立新的 SHOP_SESSION）"
+                        + "（GET /shop/api/fido/authentication/cross-device/poll）",
+                pollDenied, true, pollResp.statusCode(), pollResp.body());
+    }
+
+    /** 供情境三跨裝置流程共用的一張測試裝置（同裝置流程原本那台已被撤銷）。 */
+    private record CrossDeviceTestCredential(KeyPair keyPair, byte[] credentialId, String deviceId) {
+    }
+
+    /** 組出情境三端點 C（{@code .../result}）request body 的標準 assertion JSON。 */
+    private static Map<String, Object> buildCrossDeviceAssertionBody(KeyPair keyPair, byte[] credentialId,
+                                                                       String rpId, String origin,
+                                                                       String challengeB64, long signCount)
+            throws Exception {
+        byte[] authenticatorData = WebAuthnCeremonyFixtures.buildAuthenticatorData(rpId, (byte) 0x05, signCount,
+                null, null, null);
+        byte[] clientDataJson = WebAuthnCeremonyFixtures.buildClientDataJson(JSON, "webauthn.get", challengeB64, origin);
+        byte[] signature = WebAuthnCeremonyFixtures.signEcdsa(keyPair.getPrivate(), authenticatorData,
+                WebAuthnCeremonyFixtures.sha256(clientDataJson));
+        String credIdB64 = B64URL.encodeToString(credentialId);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", credIdB64);
+        body.put("rawId", credIdB64);
+        body.put("type", "public-key");
+        body.put("response", Map.of(
+                "clientDataJSON", B64URL.encodeToString(clientDataJson),
+                "authenticatorData", B64URL.encodeToString(authenticatorData),
+                "signature", B64URL.encodeToString(signature)));
+        return body;
+    }
+
+    /** {@code qrUrl} 格式固定為 {@code https://<app-link-host>/x/<xdevId>}（api-contract.md §3.4.A）。 */
+    private static String extractXdevIdFromQrUrl(String qrUrl) {
+        return qrUrl.substring(qrUrl.lastIndexOf('/') + 1);
+    }
+
+    /**
+     * 【僅供本 harness 對外驗證合約用】不驗簽、只 base64url 解碼 JWT 中段 payload 讀 claims。
+     * 真正的信任邊界驗證（ES256 簽章 + JWKS）已由 {@code FidoSessionJwtValidator}（單元/整合測試
+     * 涵蓋）與 {@link #runCrossDeviceShopLoginFlow} 內經 shopping-site-reference 真實驗簽的路徑
+     * 負責；這裡只是要讀 {@code amr} claim 內容，不重新驗證簽章。
+     */
+    private static JsonNode decodeJwtPayloadUnverified(String jwt) throws IOException {
+        String[] parts = jwt.split("\\.");
+        byte[] payloadBytes = B64URL_DEC.decode(parts[1]);
+        return JSON.readTree(payloadBytes);
     }
 
     // ------------------------------------------------------------------

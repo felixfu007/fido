@@ -1,11 +1,16 @@
 # fido-server 管理後台（admin web UI / dashboard）— 必要性評估
 
-> **狀態：評估文件，尚未拍板，待專案擁有者決策。**
-> 本文只做需求拆解與方案比較，不下最終決策、未更動 `CLAUDE.md`、未寫任何程式碼。
-> 文末「專業建議」段落是**建議傾向**而非決策，供決策者參考。
-> 若擁有者選擇任一需投入實作的方案，請先在本文或 `CLAUDE.md` 記下結論，再交 dev-engineer / devops-engineer 承接。
+> **狀態：已拍板（2026-07-27）——擁有者同意採納本文建議的【方案 A】，並要付諸實作。**
+> 拍板內容：(1) 維持 CLI-only、**不做**任何 web 管理後台（方案 B 唯讀 UI 維持「觸發式再議」、方案 C 不採）；
+> (2) 開通 Actuator `metrics` **＋少量非個資業務指標**；(3) admin CLI 新增唯讀 `list-tenants`；(4) 跨租戶裝置總覽不做。
+> **重要落地限制（拍板時新增，本文 §2 方案 A 第 1 點原本只寫「綁內網/localhost」）**：查證發現 `ApiKeyAuthFilter.PUBLIC_PATH_PREFIXES`
+> 含 `"/actuator"` 且專案**無 Spring Security**，`/actuator/**` 對任何能連到 8443 的人都免認證；而情境三要求手機 App
+> 直連 8443，故該端口不可假設為內網。因此 metrics **必須**改置於獨立的 `management.server.port`，不得只在主端口加
+> `exposure.include`。完整實作規格（含 metric 名稱/標籤硬規則、`list-tenants` 欄位與禁印項、連帶要改的 E2E harness 與
+> vendor 文件）見 `CLAUDE.md`「待辦事項」的 dev-engineer 交辦條目與「管理後台 / 客戶 Portal 評估拍板結果」段落。
+> 本文以下內容維持撰寫時的原貌（評估過程紀錄），不再改寫。
 >
-> 撰寫：systems-analyst｜日期：2026-07-25｜對照原始碼版本：`main` @ 75ed0f4
+> 撰寫：systems-analyst｜日期：2026-07-25｜對照原始碼版本：`main` @ 75ed0f4｜拍板回填：2026-07-27
 
 ---
 

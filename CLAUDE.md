@@ -29,6 +29,8 @@
 | API 認證 Header | `X-API-Key`（必，決定租戶）+ 選用 `X-Tenant-Id`（交叉檢查）/ `X-Request-Id`（追蹤） |
 | 租戶速率限制 | 每租戶 100 TPS，超過回 `429` + `Retry-After` |
 | 正式租戶開通 | **已拍板，待 dev-engineer 實作**：採**本機 admin CLI**（Spring Boot `CommandLineRunner`，`admin-cli` profile 啟動、不起 web server、一次性執行後 `System.exit`），**不**開對外管理 REST 端點。理由見下方「租戶開通 / 簽章金鑰 CLI 決策」。`create-tenant` 指令由平台維運方在伺服器主機上執行，輸入租戶名/`rp_id`/`expected_origin`（可多個）/選填 `rate-limit-tps`，自動產生高熵 API Key、以既有 `ApiKeyService` 規則存雜湊+前綴、明碼金鑰**只印一次到 stdout**（提示安全轉交、絕不寫 log）。原生 App 綁定（`tenant_app_bindings`）**刻意分成獨立 `add-app-binding` 指令**、不併入 `create-tenant`（呼應 OB6 人工 onboarding、opt-in 的後續步驟）。`DevDataSeeder` 續留為**僅 dev** 用途（`fido.dev-seed.enabled` 預設 `false`），**上線前務必確認關閉**；正式開通一律走 CLI 不再人工 `INSERT`。 |
+| 內部管理後台 / 可觀測性 | **已拍板（2026-07-27，擁有者同意 `docs/decisions/fido-server-admin-backend-evaluation.md` 的建議）＝方案 A**：**不做**任何 web 管理後台（唯讀 dashboard 與 CRUD 後台皆不做），特權管理操作維持 CLI-only；改為 (1) 開通 Actuator `metrics` + 少量**非個資**業務指標（**必須置於獨立的管理端口，不得掛在對外的 8443**——`/actuator/**` 目前繞過 `ApiKeyAuthFilter` 且無 Spring Security，等於完全免認證；理由與規格見下方「管理後台 / 客戶 Portal 評估拍板結果」），(2) admin CLI 新增唯讀 `list-tenants` 指令，(3) 跨租戶裝置總覽**不做**（與「非身分來源」定位及個資最小化有張力）。評估文件的方案 B（內網唯讀 web UI）維持「觸發式再議」，升級前需擁有者對個資/攻擊面簽核；方案 C（CRUD 後台）與 CLI-only 決策衝突，不採。 |
+| 客戶自助 Portal（非技術客戶前提） | **已拍板（2026-07-27）**：`docs/decisions/non-technical-customer-web-portal-evaluation.md` §1.1 的關鍵歧義由擁有者答為**語意乙（客戶有工程團隊，只是決策者/操作者非技術）**→ 採**選項 a：不做客戶自助 Portal**。L1（客戶購物網站串接程式碼）與 L2（客戶自有環境部署運維）仍由客戶自己的工程/維運團隊負責，商業模式不動（不走代管/SaaS，「全地端部署」決策不鬆動）。**重啟評估的觸發條件**：當「非技術客戶反覆要求自助查詢、且其工程團隊沒空代勞」成為實際、反覆出現的營運痛點時再議；重啟時須**先**過個資法（`audit_log` 含 `user_ref_id`/`ip_address`/`detail`）與「對外多租戶認證端點」攻擊面簽核，且範圍須嚴守唯讀＋租戶隔離＋查詢本身留稽核＋限制大量匯出。此為「決定不做」，**無任何交辦給其他 subagent 的實作項目**，勿再當成懸而未決的問題重新提出。 |
 | Session JWT 演算法 | ES256（EC P-256），公鑰經 JWKS 端點提供 |
 | Session JWT 有效期 | 120 秒 |
 | Session JWT 簽章金鑰持久化 | **已拍板，待 dev-engineer 實作**：金鑰持久化到資料庫**第八張表 `signing_keys`**（見 `docs/db-schema.md` 第 10 節 / DB18），多實例連同一庫即天然共享同一把 `ACTIVE` 金鑰，解決重啟換鑰/JWKS 不一致缺口。私鑰以 PKCS#8 存 `VARBINARY`、由既有 TDE 保護（不加應用層封裝）。**啟動行為**：載入唯一 `ACTIVE` 金鑰；全新庫首啟則自動產生並 INSERT（filtered unique index `UX_signkey_one_active` 保證至多一把 ACTIVE，兼作多實例首啟並發競態防護，敗者改讀既有金鑰）；後續啟動一律載入不重生。**輪替**：v1 只做「持久化 + 單一有效金鑰」，schema 已預留 `status`/`retired_at` 使日後輪替免改表；不做自動排程輪替，僅提供 admin CLI `rotate-signing-key` 手動指令（因 JWT 僅 120 秒效期，重疊窗口極小，JWKS 一併發布 ACTIVE+RETIRED 公鑰即可平滑過渡）。理由與規格見下方「租戶開通 / 簽章金鑰 CLI 決策」。 |
@@ -151,17 +153,40 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
   - **對外合約不變**：端點 D 的回應（`session.token`/`tokenType`/`expiresIn`/`warnings`）與儲存機制無關，`docs/api-contract.md` §3.4.D 無需改動（已於 db-schema §11 註明）。
   - **後續任務銜接**：devops-engineer 於 `infra/sql/002_create_tables.sql` 的 `cross_device_sessions` 建表加一欄 `issued_jwt NVARCHAR(4000) NULL`（在 `issued_jti` 後）、同步 `fido-server/src/test/resources/db/h2/schema-h2.sql`、於 LocalDB 重驗；dev-engineer 依上述改 `CrossDeviceSession` JPA 實體（加 `issuedJwt` 欄位映射）、`CrossDeviceLoginService`（端點 C 寫入、端點 D 守衛 UPDATE 領取）、`CrossDeviceSessionRepository`（加守衛式更新方法或改用樂觀鎖）；qa-engineer 補「多執行緒併發輪詢同一 CONFIRMED session 只有一個拿到 JWT、其餘 409」的負向測試（比照金鑰持久化那次以真實 H2 併發驗證守衛約束）。**清理排程無需改動**（`issued_jwt` 隨列一併清理，`infra/sql/006_retention_cleanup_jobs.sql` 不變）。
 
+### 管理後台 / 客戶 Portal 評估拍板結果（2026-07-27）
+
+兩份先前只是評估、未拍板的文件已由擁有者定案，兩份文件開頭的狀態列已同步改為「已拍板」：
+
+- **`docs/decisions/fido-server-admin-backend-evaluation.md` → 採方案 A**（維持 CLI-only、開通 Actuator metrics、加唯讀 `list-tenants` CLI；不做 web 後台、不做跨租戶裝置總覽）。**要付諸實作**，交辦條目見下方「待辦事項」。
+- **`docs/decisions/non-technical-customer-web-portal-evaluation.md` → §1.1 歧義＝語意乙、採選項 a**（不做客戶自助 Portal）。此為「決定不做」，無實作交辦；決策與重啟觸發條件已寫入上方決策表，勿再重複詢問。
+
+**`/actuator/info` 揭露版本 / feature flag 的資安評估（systems-analyst 拍板，非重大安全政策變更，無需擁有者簽核）**
+
+原低優先項（採用廠商無自助管道確認自己拿到的版本是否含情境三；原報告 #6/#14）建議「於 `/actuator/info` 揭露 build 版本與 feature flag」。查證後結論為**部分採納**：
+
+- **查證到的現況（比原本假設更嚴重）**：`ApiKeyAuthFilter.PUBLIC_PATH_PREFIXES` 含 `"/actuator"` 前綴，且 `fido-server/pom.xml` **沒有 Spring Security 依賴**（只有 web/validation/actuator/data-jpa/mssql-jdbc/cbor/bcprov/jjwt）——即 `/actuator/**` 對**任何能連到 `server.port: 8443` 的人**都是完全免認證的公開端點，不是「只有已認證租戶看得到」。且情境三要求**手機 App 直連 fido-server**（端點 B/C/E 不帶 X-API-Key），故 8443 實務上必須能從行動網路到達，**不能假設它是純內網端口**。另外目前 `spring-boot-maven-plugin` 沒有掛 `build-info` goal、也沒有 `git.properties`，所以 `/actuator/info` 現在其實回空 JSON。
+- **決策 1：不在對外端口（8443）揭露任何版本資訊。** 對外免認證的精確 build 版本是典型的偵察素材（版本 → 對照已知漏洞/已知未修補行為），淨風險大於便利性。此點與 `docs/vendor/environment-setup-guide.md` 既有的「`/actuator` 建議僅開放內網監控來源」方向一致，但「建議」太弱——改為由**預設設定**保證（見下方交辦：actuator 整體移到獨立管理端口）。
+- **決策 2：版本資訊改在獨立管理端口的 `/actuator/info` 揭露，欄位限定 `build.artifact` / `build.name` / `build.version` / `build.time`（`build-info` goal 產生）。** 這**已經滿足**採用廠商的原始需求：依 `environment-setup-guide.md` §1，fido-server 與其 SQL Server 是**由採用廠商自己在自有環境部署**的——他們本來就擁有主機，能在自己的機器上 curl 管理端口，這就是完整的自助管道，不需要為此開一條對外免認證的公開資訊路徑。
+- **決策 3：`features.*` feature flag ＝不做。** 查證 `fido.cross-device.*` 設定只有 `ttl-seconds`/`app-link-host`，**程式碼裡根本沒有任何 cross-device 開關**，五個端點永遠存在。因此 `features.crossDeviceLogin` 布林要嘛恆為 `true`（零資訊量），要嘛得先新做一個「真的能關掉端點」的開關（新行為 + 新錯誤碼 = 合約層變更），代價遠超這個低優先增強的價值；順帶也避開「對外揭露功能開關供攻擊者篩選目標」的爭點。**「版本 ↔ 功能」對照改由文件承接**：`docs/vendor/` 補一張版本對照表（例如 1.0.0 含情境 A、1.x 起含情境三），文件層、零攻擊面、零新機制。
+- **需擁有者簽核的分界**：若日後有人主張要在**對外端口**揭露版本或功能開關，那才是「刻意接受版本/功能偵察風險」的決策，需擁有者簽核；本次一律不做。
+
 ## 待辦事項
 
-**桌機 QR 掃碼跨裝置登入（情境三）已拍板，待實作**（設計與決策見上方「桌機 QR 掃碼跨裝置登入（情境三）決策定案」段落）：
+**（dev-engineer，已拍板待實作）內部可觀測性 + 唯讀 `list-tenants`（管理後台評估方案 A 的落地）**
 
-- **devops-engineer**：`infra/sql/` 新增第九張表 `cross_device_sessions` 的建表/索引/清理 Agent Job（比照 `auth_challenges` 過期標記+每日清理）；在 LocalDB 重新驗證含第九張表的完整 schema 建置；同步更新 H2 測試 schema。
-- **dev-engineer**：fido-server 五個新端點（`docs/api-contract.md` §3.4 A–E，端點 E `.../deny` 為缺口一新增，見上方「後續更新」段落）+ `cross_device_sessions` JPA 實體 + 狀態機（PENDING→SCANNED→CONFIRMED→CONSUMED / DENIED / EXPIRED）+ proximity 警示（**只警示不擋、寫 `audit_log.detail.proximityMismatch`**）+ assertion 驗證重用 `AuthenticationService.verifyResult` + `JwtService` cross-device 路徑 `amr` 加 `"xdev"`；`shopping-site-reference` start/poll 代理 + 重用 JWT 收尾 + **示範偵測 `amr` 含 `xdev` 時對敏感操作要求 step-up 的授權邏輯**；`android-credential-provider` 新增 `CrossDeviceLoginActivity`（deep link 喚起、App 直連 fido-server、重用既有 assertion 簽章邏輯，取消/無憑證分支呼叫端點 E，嚴守 carve-out 範圍邊界）。
-  - **注意（實作進度）**：A–D、shopping-site 代理、`CrossDeviceLoginActivity` 主流程已由三個並行任務完成並各自測試通過（82/60/53）；上述本行保留為完整需求索引。**尚未完成、需後續小任務銜接的是端點 E**：fido-server 加 `.../deny` handler（`CrossDeviceLoginController` + service，複用 `xdevId` capability 解析與狀態機轉移）、Android 取消/無憑證分支改呼叫端點 E。`shopping-site-reference` 無需改動。
-  - **注意（缺口二：session JWT 落庫，已拍板待實作）**：`cross_device_sessions` 新增 `issued_jwt NVARCHAR(4000) NULL`，取代 `CrossDeviceLoginService.pendingTokens` 記憶體 Map（因擁有者確認容器化水平擴充、端點 C/D 可能跨 pod）。詳細規格見上方「缺口二」段落。銜接：devops-engineer（`infra/sql/002` 加欄＋H2 schema 同步＋LocalDB 重驗）、dev-engineer（實體 `issuedJwt` 映射、端點 C 寫入、端點 D 守衛式 UPDATE 領取並清 NULL、移除記憶體 Map 與其 409 分支）、qa-engineer（併發輪詢至多一個拿到 JWT 的負向測試）。
-- **qa-engineer**：新增 proximity 不符「警示但放行」情境、`amr` 含 `xdev` 時敏感操作被要求 step-up 的授權情境、狀態機一次性/重放/跨 session 混淆負向測試、跨行程 E2E（比照 `CrossProcessE2EManualRunner`）。
+1. **Actuator metrics 開通，但不得只是在主端口的 `exposure.include` 加 `metrics`**（那會讓 metrics 變成免認證公開，理由見上方評估）。做法：
+   - `application.yml` 新增 `management.server.port: 8444`（與 `server.port: 8443` 分離），`management.endpoints.web.exposure.include: health,info,metrics,prometheus`，並掛上 `spring-boot-maven-plugin` 的 `build-info` goal（供 `/actuator/info` 回 build 版本，見上方決策 2）。
+   - 加 `micrometer-registry-prometheus` 依賴（只加依賴、不寫程式；Grafana 抓取需要 `prometheus` 端點）。
+   - **不要**設 `management.server.address: 127.0.0.1`：擁有者已確認容器化、動態 pod 數的水平擴充部署，kubelet 探針是連 **pod IP** 而非 loopback，綁 loopback 會讓 liveness/readiness 失效。改由部署層把關（Service/Ingress 只發佈 8443；8444 以 NetworkPolicy/防火牆限給監控來源），此要求須寫進 `docs/vendor/environment-setup-guide.md`。
+   - **連帶要一起改、勿漏的既有引用**：`fido-server/src/test/java/com/fido/server/e2e/CrossProcessE2EManualRunner.java`（第 114–115 行以 `FIDO_BASE_URL + "/actuator/health"` 做存活探測，改指管理端口，否則 CI 的 `cross-process-e2e` job 會掛）；`docs/vendor/environment-setup-guide.md`（公開端點表、設定表 `management.endpoints.web.exposure.include`、健康檢查段、上線檢查清單）、`docs/vendor/maintenance-guide.md`（`/actuator/health` 告警與升級冒煙測試兩處）、`docs/vendor/api-integration-guide.md`（「`/actuator/*` 不需 API Key」一句）。`ApiKeyAuthFilter` 的 `"/actuator"` 公開前綴**保留**（管理端口分離後主端口不再提供 actuator，該前綴成為無害殘留，且單端口 fallback 部署仍需要它）。
+2. **自訂業務指標（本次要做，名稱/標籤已由 systems-analyst 定案，勿自行猜測）**：`fido.ratelimit.rejections`（`RateLimitService` 回 429 時 +1）、`fido.auth.verify.failures`（`AuthenticationService.verifyResult` 驗證失敗時 +1，tag `reason`＝錯誤碼如 `CREDENTIAL_REVOKED`/`SIGNATURE_INVALID`/`COUNTER_REGRESSION`）、`fido.credential.auto_revocations`（sign counter 倒退自動撤銷時 +1）、`fido.crossdevice.proximity_mismatch`（端點 C 判定 `proximityMismatch=true` 時 +1）。**標籤硬規則**：只允許低基數、非個資的固定列舉值 tag；**嚴禁**把 `user_ref_id`/`external_user_id`/`credential_id`/IP/`xdevId` 或任何使用者可控字串當 tag（既是 PII 外洩，也會造成基數爆炸）。唯一允許的租戶維度是 `fido.ratelimit.rejections` 上的 `tenant` tag（值取 `tenant_uid`，per-tenant 限流才有意義；租戶數量少、非個資），其餘 counter **不加** tenant tag。
+3. **admin CLI 新增唯讀 `list-tenants`**：`--fido.admin.command=list-tenants`，無其他必填參數，沿用既有 `AdminCliRunner`/`admin-cli` profile 骨架（不起 web server、跑完 `System.exit`）。輸出欄位：`tenant_uid`、`name`、`rp_id`、`status`、`rate_limit_tps`，另允許 `expected_origin`（非機密、對排查 `ORIGIN_NOT_ALLOWED` 很有用）。**嚴禁**印 `api_key_hash`；`api_key_prefix` 本次也**不印**（維持擁有者指定的欄位集，若日後客服需要以前綴認領金鑰再另案決定）。**唯讀指令不寫 `audit_log`**（既有慣例只對狀態變更操作寫稽核，且此指令只能在主機本機執行）。**注意**：`TenantRepository` 目前**沒有** `findAll()`（只有 findById/findByTenantUid/findByApiKeyHash/findByRpId/save），需在介面新增並於 JPA 與 in-memory 兩個實作補齊。
+4. 測試：比照 `AdminCliRunnerTest` 以 in-memory repository 覆蓋 `list-tenants` 的正常路徑與「零租戶」路徑，並斷言輸出**不含**任何金鑰/雜湊字樣；metrics 部分至少確認四個 counter 名稱與 tag key 符合上述規格。
 
-上述兩項缺口（Session JWT 簽章金鑰持久化、正式租戶開通 CLI）已完成實作並經 qa-engineer 獨立驗證通過，相關採用廠商文件用詞已同步更新。
+**桌機 QR 掃碼跨裝置登入（情境三）：剩餘未完成項**（A–E 五個端點、`cross_device_sessions`（含 `issued_jwt`）、狀態機、proximity 警示、`amr` `xdev`、shopping-site 代理與 step-up 示範、`CrossDeviceLoginActivity` 含端點 E 的取消/無憑證分支——**皆已實作完成並經測試**，經 systems-analyst 於 2026-07-27 逐一比對原始碼與 git log（`75ed0f4` 情境三主體、`b8f72b5` JWT 落庫）核實，細節已併入上方「桌機 QR 掃碼跨裝置登入（情境三）決策定案」段落，此處不再重複。以下為**核實後仍未完成**的部分）：
+
+- **qa-engineer（唯一明確未完成項）**：情境三的**跨行程 E2E 尚未涵蓋**——`fido-server/src/test/java/com/fido/server/e2e/` 底下查無任何 `cross-device`/`xdev` 字樣，現有 `CrossProcessE2EManualRunner` 的 15 項檢查全是同裝置註冊/登入/JWT 驗證/裝置管理/IDOR。請比照該 runner 補一段真實跨行程的情境三流程（端點 A 建 session → 模擬手機端 claim/result（含 proximity 不符的警示但放行案例）→ 端點 D 領取 JWT 且 `amr` 含 `xdev` → shopping-site 端對敏感操作要求 step-up → 端點 E deny 路徑）。其餘 qa 交辦項**已完成**：proximity 警示但放行、`amr` step-up 授權、狀態機一次性/重放/跨租戶負向測試分別在 `CrossDeviceLoginServiceTest`、`CrossDeviceLoginFlowTest`、`shopping-site-reference` 的 `CrossDeviceAuthenticationProxyControllerTest` 覆蓋；「併發輪詢至多一個拿到 JWT」則在 `JpaPersistenceH2FlowTest#consumeConfirmedJwtIsAtomicUnderRealConcurrentH2Writes` 以真實 H2 併發驗證。
+- **devops-engineer（待確認，非確定未做）**：`infra/sql/` 的第九張表建表（含 `issued_jwt NVARCHAR(4000) NULL`）、索引、兩個清理/過期標記 Agent Job 都已在檔案內（`002_create_tables.sql`、`003_create_indexes.sql`、`006_retention_cleanup_jobs.sql`），H2 測試 schema 亦已同步；但「在 LocalDB 重新驗證含第九張表的完整 schema 建置」**查無留下的驗證腳本或紀錄**（`infra/tools/sql-runner/localdb/` 只有 `verify_tenant_app_bindings.ps1`）。請確認是否已驗證過；若未，補跑一次並比照既有慣例留下 `verify_cross_device_sessions.ps1` 之類的腳本。**驗證腳本嚴禁使用 `DROP DATABASE` / `DROP TABLE`。**
 
 先前列出的三項（`shopping-site-reference/` CSRF 防護、session cookie
 `secure` 預設值、`android-credential-provider/` 啟動器畫面 Option B 實作）皆已完成，過程與結果
@@ -171,11 +196,11 @@ PoC 用 Gradle product flavor 把診斷 harness（含 `HarnessActivity`，唯一
 CI pipeline（原本盤點出的缺口之一）已建立，見下方「CI pipeline」段落。SQL Server 正式環境套用
 （`infra/sql/` 腳本尚未在真正的 SQL Server 實例上驗證過）因目前無可用環境，暫緩處理，非本次範圍。
 
-**採用廠商文件試跑（adopting-vendor-engineer 模擬客戶視角）盤點出 22 項卡點，systems-analyst 已處理**：19 項為文件矛盾/範例缺漏/格式未定義，已直接修正對應 `docs/vendor/*.md`（含最嚴重的「JWT 金鑰是否持久化」三份文件互相矛盾 #1、`maintenance §9` 自相矛盾 #2/#21、`xdevId` vs `qrUrl` 安全語意疑點 #15，及 #3–#5/#7–#13/#16–#19/#22 各項；已對照 `JwtService`/`SigningKeyFactory`/`AdminCliRunner`/`FidoSessionJwtValidator`/`db-schema` 查證後才寫，未憑空編）。以下 3 項屬產品/機制**增強**（非文件即可解、非阻塞），列為低優先待辦：
+**採用廠商文件試跑（adopting-vendor-engineer 模擬客戶視角）盤點出 22 項卡點，systems-analyst 已處理**：19 項為文件矛盾/範例缺漏/格式未定義，已直接修正對應 `docs/vendor/*.md`（含最嚴重的「JWT 金鑰是否持久化」三份文件互相矛盾 #1、`maintenance §9` 自相矛盾 #2/#21、`xdevId` vs `qrUrl` 安全語意疑點 #15，及 #3–#5/#7–#13/#16–#19/#22 各項；已對照 `JwtService`/`SigningKeyFactory`/`AdminCliRunner`/`FidoSessionJwtValidator`/`db-schema` 查證後才寫，未憑空編）。以下 3 項屬產品/機制**增強**（非文件即可解、非阻塞），列為低優先待辦（第一項已於 2026-07-27 拍板結案，保留一行紀錄避免日後重複提出）：
 
-- **（低優先）採用廠商無自助管道確認「自己取得的版本是否含情境三（跨裝置 QR）等功能」（原報告 #6 / #14）**：目前唯一途徑是「向平台營運方確認」（文件已如此指引）。可評估的增強：於 `/actuator/info` 揭露 build 版本與 feature flag（例如 cross-device 是否啟用），讓採用廠商可自助查詢。屬產品決策，需先評估是否要對外揭露功能開關資訊（資安面）。
+- ~~**（低優先）採用廠商無自助管道確認版本/功能（原報告 #6 / #14）**~~ → **已於 2026-07-27 由 systems-analyst 評估拍板**：不在對外端口揭露、改在獨立管理端口的 `/actuator/info` 揭露 build 版本、不做 `features.*` feature flag、版本↔功能對照由 `docs/vendor/` 文件承接。結論與理由見上方「管理後台 / 客戶 Portal 評估拍板結果」，實作已併入上方 dev-engineer 交辦條目第 1 點（`build-info` goal）與第 1 點連帶的 vendor 文件更新（另需補一張版本↔功能對照表）。
 - **（低優先）跨裝置 `DENIED` 細部原因不回傳桌機（原報告 #18 的增強面）**：現行行為（`denyReason` 僅寫 `audit_log`、桌機只看到通用 `DENIED`）為**刻意**避免向桌機洩漏「該手機是否已註冊本站憑證」，已在 `api-integration-guide §11.2` 誠實記為限制。若未來有租戶明確要求對「使用者主動取消」vs「本機無憑證」給不同桌機文案，需 systems-analyst 評估「回傳粗粒度原因是否引入列舉風險」後再定，屬合約層變更。
-- **（低優先）備份檔清理 / 異地備援僅有文字建議、無可直接套用的腳本範本（原報告 #20）**：`maintenance §2.3` 已給最低保留建議（FULL 5 份 / DIFF 14 天 / LOG 8 天）與方向（Maintenance Plan 或 OS 排程），但未附實際 PowerShell/robocopy/`sp_delete_backuphistory` 範本。可由 devops-engineer 於 `infra/sql/` 或 `docs/vendor/` 補一份可調整的清理＋異地同步腳本範本。
+- ~~**（低優先）備份檔清理 / 異地備援僅有文字建議、無可直接套用的腳本範本（原報告 #20）**~~ → **已於 2026-07-27 由 devops-engineer 完成**：新增可調整的 PowerShell 範本 `infra/scripts/007_backup_retention_and_offsite_sync.ps1`（FULL/DIFF/LOG 保留期皆為可覆寫參數、預設 `-DryRun` 不會誤刪/誤複製、異地目的地為需替換的佔位路徑），`docs/vendor/maintenance-guide.md` §2.3 已補上指向此檔的說明。
 
 （另：`maintenance §11.3` 已載明的「每租戶 proximity strict 政策」仍為既有的未來可擴充項，不重複列。）
 

@@ -1,6 +1,7 @@
 package com.fido.server.service;
 
 import com.fido.server.domain.Tenant;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
@@ -23,6 +24,11 @@ public class RateLimitService {
     }
 
     private final Map<Long, Window> windows = new ConcurrentHashMap<>();
+    private final MeterRegistry meterRegistry;
+
+    public RateLimitService(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+    }
 
     public boolean tryAcquire(Tenant tenant) {
         long currentSecond = System.currentTimeMillis() / 1000L;
@@ -33,6 +39,13 @@ public class RateLimitService {
             return existing;
         });
         int count = window.count().incrementAndGet();
-        return count <= tenant.getRateLimitTps();
+        boolean allowed = count <= tenant.getRateLimitTps();
+        if (!allowed) {
+            // 唯一允許帶租戶維度 tag 的 counter（見 MetricNames 標籤硬規則說明）：per-tenant
+            // 限流才有意義，租戶數量少、tenant_uid 非個資。
+            meterRegistry.counter(MetricNames.RATE_LIMIT_REJECTIONS,
+                    MetricNames.TAG_TENANT, String.valueOf(tenant.getTenantUid())).increment();
+        }
+        return allowed;
     }
 }

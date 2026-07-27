@@ -50,10 +50,11 @@
 
 | 項目 | 說明 |
 |---|---|
-| 對外 API port | `fido-server` 預設監聽 **`8443`**（`application.yml` 的 `server.port`）。貴公司購物網站後端須能以 server-to-server 方式連到此 port。 |
-| TLS | 全站強制 TLS（見 API 合約 §1.1）。**注意：`fido-server` 應用層本身並未強制 TLS**（`ApiKeyAuthFilter` 沒有 `isSecure()` 檢查），TLS 應由部署層負責——建議在 `fido-server` 前方架設反向代理（如 Nginx / IIS ARR）或負載平衡器終結 TLS，或另行設定 `server.ssl.*`。正式環境絕不可讓 API 走純 HTTP。 |
+| 對外 API port | `fido-server` 預設監聽 **`8443`**（`application.yml` 的 `server.port`）。貴公司購物網站後端須能以 server-to-server 方式連到此 port。**情境三（跨裝置 QR 登入）啟用時，手機 App 也會直連此 port**（部分端點以 `xdevId` capability 認證、不帶 `X-API-Key`），故不能假設此 port 只對內網/後端可達。 |
+| **管理端口（監控用，v1.0.0 起獨立）** | `fido-server` 的 Actuator（`/actuator/health`、`/actuator/info`、`/actuator/metrics`、`/actuator/prometheus`）**自 v1.0.0 起改監聽獨立的 `8444`**（`application.yml` 的 `management.server.port`），**不再**掛在對外的 `8443`。理由：`/actuator/**` 目前繞過 `ApiKeyAuthFilter` 的 API Key 驗證、且本專案未依賴 Spring Security，若掛在 `8443` 上等於對任何能連到 `8443` 的人完全免認證公開（尤其上一列已說明 `8443` 不能假設是純內網端口）。**部署時務必只對外發布 `8443`，`8444` 只開放給貴公司內部監控來源**（Prometheus/Grafana 等），透過防火牆或 NetworkPolicy 限制來源，`fido-server` 應用層本身不做這層網路隔離。**注意**：本專案刻意不把 `management.server.address` 設為 `127.0.0.1`——若貴公司採容器化部署、以水平擴充多個 pod 的方式運行 `fido-server`，探針（liveness/readiness）通常是連 pod IP 而非 loopback，綁 loopback 會讓健康檢查失效；`8444` 的網路層隔離請務必在部署層（Service/Ingress/NetworkPolicy/防火牆）處理，不要誤以為應用程式已經處理好這一層。 |
+| TLS | 全站強制 TLS（見 API 合約 §1.1）。**注意：`fido-server` 應用層本身並未強制 TLS**（`ApiKeyAuthFilter` 沒有 `isSecure()` 檢查），TLS 應由部署層負責——建議在 `fido-server` 前方架設反向代理（如 Nginx / IIS ARR）或負載平衡器終結 TLS，或另行設定 `server.ssl.*`。正式環境絕不可讓 API 走純 HTTP。此建議對 `8443` 與 `8444` 皆適用。 |
 | 資料庫連線 | `fido-server` → SQL Server（預設 TCP 1433），連線字串預設 `encrypt=true`。此連線應限制在內網、以防火牆限制來源。 |
-| 公開端點 | 只有 `GET /api/v1/.well-known/jwks.json`（JWKS 公鑰）與 `/actuator/*`（健康檢查）不需 API Key。JWKS 需可被貴公司後端讀取以驗證 session JWT 簽章；`/actuator` 建議僅開放內網監控來源。 |
+| 公開端點（`8443`，不需 API Key） | 只有 `GET /api/v1/.well-known/jwks.json`（JWKS 公鑰）不需 API Key。JWKS 需可被貴公司後端讀取以驗證 session JWT 簽章。**`/actuator/*` 已移到獨立管理端口 `8444`（見上）**，`8443` 上不再提供任何 actuator 端點。 |
 
 ---
 
@@ -117,7 +118,8 @@
 
 | 設定鍵 | 預設值 | 說明 |
 |---|---|---|
-| `server.port` | `8443` | API 監聽 port |
+| `server.port` | `8443` | 對外 API 監聽 port |
+| `management.server.port` | `8444` | **獨立管理端口**（v1.0.0 起），供 Actuator health/info/metrics/prometheus 使用，**不與 `server.port` 共用**（見 §2.3「管理端口」說明）。部署時務必只對外發布 `8443`。 |
 | `fido.persistence.mode` | `jpa` | **正式部署必須為 `jpa`**（接 SQL Server）。`memory` 為純記憶體、不建 DataSource，僅供本機開發，正式環境嚴禁使用。 |
 | `spring.datasource.url` | `jdbc:sqlserver://REPLACE_WITH_SQLSERVER_HOST:1433;databaseName=FidoServerDb;encrypt=true;trustServerCertificate=false` | 佔位值，須替換為實際主機 |
 | `spring.datasource.username` / `password` | `REPLACE_WITH_...` | 佔位值，建議走環境變數或密碼管理工具 |
@@ -154,7 +156,7 @@
 | `fido.challenge.ttl-seconds` | `60` | WebAuthn challenge 時效（秒），對齊 API 合約 |
 | `fido.rate-limit.default-tps` | `100` | 每租戶預設速率上限，可於 `tenants.rate_limit_tps` 逐租戶覆寫 |
 | `fido.dev-seed.enabled` | `false` | 預設已關閉，正式部署**不需**也**不應**額外開啟。此為開發用種子租戶，開啟後會以固定的公開 API Key（`dev-api-key-...`）建立一個 `Demo Shop` 租戶；本機開發如需這個示範租戶，須自行加 `--fido.dev-seed.enabled=true` 明確開啟，不會預設出現。正式部署時應確認未被人為覆寫成 `true`，並移除整個 `fido.dev-seed` 區塊。 |
-| `management.endpoints.web.exposure.include` | `health,info` | 只暴露 health / info 兩個 actuator 端點 |
+| `management.endpoints.web.exposure.include` | `health,info,metrics,prometheus` | 開放 health / info / metrics / prometheus 四個 actuator 端點——**皆只在獨立管理端口 `8444` 上提供，`8443` 不受影響**（見 §2.3）。`metrics`/`prometheus` 供貴公司監控系統（如 Prometheus/Grafana）抓取內建業務指標（`fido.ratelimit.rejections`/`fido.auth.verify.failures`/`fido.credential.auto_revocations`/`fido.crossdevice.proximity_mismatch`，詳見維護手冊第 7 節）。 |
 | `management.endpoint.health.show-details` | `never` | 健康檢查不對外洩漏細節 |
 | `logging.level.com.fido.server` | `INFO` | 日誌等級 |
 
@@ -276,15 +278,29 @@ CLI 會自動換算 `apk_key_hash_origin`（`android:apk-key-hash:<base64url(指
 
 同一支 admin CLI 也提供 session JWT 簽章金鑰的手動輪替指令，與租戶開通無關，用法與運維時機見 [`maintenance-guide.md`](maintenance-guide.md) 第 4 節。
 
+### 6.5 唯讀租戶清單（`list-tenants`，v1.0.0 起新增）
+
+需要盤點目前有哪些租戶時，可執行唯讀指令，不需其他參數：
+
+```
+java -jar fido-server.jar --spring.profiles.active=admin-cli \
+  --fido.admin.command=list-tenants
+```
+
+輸出每個租戶的 `tenant_uid`/`name`/`rp_id`/`status`/`rate_limit_tps`/`expected_origin`。**刻意不印 `api_key_hash`/`api_key_prefix`**（維持金鑰資訊最小化揭露原則）。此指令為唯讀查詢，**不會**寫入 `audit_log`（與 `create-tenant`/`add-app-binding`/`rotate-signing-key` 這三個會變更狀態的指令不同）。
+
 ---
 
 ## 7. 健康檢查與日誌
 
 ### 7.1 健康檢查端點
 
-- `GET /actuator/health` — 存活 / 就緒檢查（公開端點，不需 API Key）。回 `UP` 代表服務正常。`show-details=never`，不對外洩漏元件細節。
-- `GET /actuator/info` — 基本資訊端點。
-- 建議監控系統定期輪詢 `/actuator/health`，並僅開放內網監控來源存取 `/actuator/*`。
+**v1.0.0 起，以下端點一律在獨立管理端口 `http://<host>:8444` 上，不是 `8443`**（見 §2.3「管理端口」、§4.1 `management.server.port`）：
+
+- `GET :8444/actuator/health` — 存活 / 就緒檢查（管理端口上不需 API Key，但**不應對外公開**，只開放給貴公司內部監控來源）。回 `UP` 代表服務正常。`show-details=never`，不對外洩漏元件細節。
+- `GET :8444/actuator/info` — 基本資訊端點，回傳 `build.artifact`/`build.name`/`build.version`/`build.time`（供確認實際部署的版本）。
+- `GET :8444/actuator/metrics`、`GET :8444/actuator/prometheus` — 內建業務指標，供監控系統抓取，詳見維護手冊第 7 節。
+- 建議監控系統（如 Prometheus）定期輪詢這個管理端口；**務必以防火牆/NetworkPolicy 限制只有內部監控來源能連到 `8444`**，`fido-server` 應用層本身不做這層網路隔離。
 
 ### 7.2 JWKS 端點（部署後務必驗證可達）
 
@@ -308,5 +324,6 @@ CLI 會自動換算 `apk_key_hash_origin`（`android:apk-key-hash:<base64url(指
 - [ ] `infra/sql/001`–`006` 已依序執行，佔位值已替換
 - [ ] TDE 憑證 `.cer` / `.pvk` 已異地備份，密碼分開保管
 - [ ] 已手動觸發第一次完整備份，備份與清理 Agent Job 皆啟用
-- [ ] `/actuator/health` 回 `UP`，`/api/v1/.well-known/jwks.json` 可被後端讀取
+- [ ] 管理端口 `8444`（Actuator health/info/metrics/prometheus）回 `UP`，且**只對內部監控來源開放**（防火牆/NetworkPolicy 已限制來源，未對外公開）
+- [ ] `/api/v1/.well-known/jwks.json`（`8443`）可被後端讀取
 - [ ] 至少一個正式租戶已開通（`tenants` 有列，API Key 已安全交付）

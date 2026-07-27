@@ -9,7 +9,10 @@ import com.fido.server.domain.enums.TenantStatus;
 import com.fido.server.repository.AuthChallengeRepository;
 import com.fido.server.repository.TenantRepository;
 import com.fido.server.service.ApiKeyService;
+import com.fido.server.service.MetricNames;
 import com.fido.server.testsupport.TestKeyAttestationFixtures;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.bouncycastle.asn1.ASN1EncodableVector;
 import org.bouncycastle.asn1.ASN1Enumerated;
 import org.bouncycastle.asn1.ASN1Integer;
@@ -57,6 +60,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -103,6 +107,9 @@ class DeviceManagementAndSecurityEdgeCaseTest {
 
     @Autowired
     private ApiKeyService apiKeyService;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final ObjectMapper cborMapper = new ObjectMapper(new CBORFactory());
@@ -239,6 +246,13 @@ class DeviceManagementAndSecurityEdgeCaseTest {
         String externalUserId = "u-counter-regress-" + RANDOM.nextInt(1_000_000);
         RegisteredDevice device = registerDevice(externalUserId, "Counter Regress Device");
 
+        // 基準值：counter 是共用 registry、不帶 tag，跨測試方法/測試類別可能已被其他情境增加過，
+        // 故用「執行前後差值」而非絕對值斷言（fido.auth.verify.failures 因帶 reason tag，改用
+        // find(name).tags(reason,...) 精準鎖定該 tag 組合，同樣採差值）。
+        double autoRevocationsBefore = counterCount(MetricNames.CREDENTIAL_AUTO_REVOCATIONS);
+        double counterRegressionFailuresBefore = authVerifyFailuresCount("SIGN_COUNTER_REGRESSION");
+        double credentialRevokedFailuresBefore = authVerifyFailuresCount("CREDENTIAL_REVOKED");
+
         // 正常登入一次，把 sign_count 推到 5。
         loginAttempt(externalUserId, device.credentialId(), device.keyPair().getPrivate(), 5L)
                 .andExpect(status().isOk());
@@ -247,6 +261,13 @@ class DeviceManagementAndSecurityEdgeCaseTest {
         loginAttempt(externalUserId, device.credentialId(), device.keyPair().getPrivate(), 2L)
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.error.code").value("SIGN_COUNTER_REGRESSION"));
+
+        // fido.credential.auto_revocations（不帶 tag）與 fido.auth.verify.failures{reason=
+        // SIGN_COUNTER_REGRESSION} 皆應 +1（CLAUDE.md「內部可觀測性」交辦第 2 點：兩個指標可
+        // 對同一事件都增加，語意不同——前者是「自動撤銷發生次數」，後者是「驗證失敗次數」）。
+        assertThat(counterCount(MetricNames.CREDENTIAL_AUTO_REVOCATIONS)).isEqualTo(autoRevocationsBefore + 1);
+        assertThat(authVerifyFailuresCount("SIGN_COUNTER_REGRESSION"))
+                .isEqualTo(counterRegressionFailuresBefore + 1);
 
         // 撤銷是否「真的生效」：裝置狀態應變 REVOKED。
         mockMvc.perform(get("/api/v1/users/{id}/devices", externalUserId)
@@ -260,6 +281,12 @@ class DeviceManagementAndSecurityEdgeCaseTest {
         loginAttempt(externalUserId, device.credentialId(), device.keyPair().getPrivate(), 6L)
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.error.code").value("CREDENTIAL_REVOKED"));
+
+        // fido.auth.verify.failures{reason=CREDENTIAL_REVOKED} 也應 +1，但 auto_revocations
+        // 不應再變動（這次是「用已撤銷憑證登入」，不是新一次的自動撤銷事件）。
+        assertThat(authVerifyFailuresCount("CREDENTIAL_REVOKED"))
+                .isEqualTo(credentialRevokedFailuresBefore + 1);
+        assertThat(counterCount(MetricNames.CREDENTIAL_AUTO_REVOCATIONS)).isEqualTo(autoRevocationsBefore + 1);
     }
 
     // ------------------------------------------------------------------
@@ -310,6 +337,15 @@ class DeviceManagementAndSecurityEdgeCaseTest {
         JsonNode body = jsonMapper.readTree(firstRateLimited.getResponse().getContentAsString());
         assertTrue("RATE_LIMITED".equals(body.get("error").get("code").asText()),
                 "429 回應的 error.code 應為 RATE_LIMITED，實際為 " + body.get("error").get("code"));
+
+        // fido.ratelimit.rejections：唯一允許帶 tenant tag 的 counter（CLAUDE.md「內部可觀測性」
+        // 交辦第 2 點標籤硬規則），值為 tenant_uid。此租戶是本測試方法內新建、tag 值唯一，
+        // 不需要差值手法，直接比對 count == rateLimitedCount 即可。
+        Counter rejectionsCounter = meterRegistry.find(MetricNames.RATE_LIMIT_REJECTIONS)
+                .tag(MetricNames.TAG_TENANT, tenant.getTenantUid().toString())
+                .counter();
+        assertThat(rejectionsCounter).isNotNull();
+        assertThat(rejectionsCounter.count()).isEqualTo((double) rateLimitedCount);
     }
 
     // ------------------------------------------------------------------
@@ -602,6 +638,20 @@ class DeviceManagementAndSecurityEdgeCaseTest {
     // ------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------
+
+    /** 不帶 tag 的 counter 目前值；尚未有任何事件發生過時 find(...).counter() 回傳 null，視為 0。 */
+    private double counterCount(String name) {
+        Counter counter = meterRegistry.find(name).counter();
+        return counter == null ? 0.0 : counter.count();
+    }
+
+    /** {@code fido.auth.verify.failures}{@code {reason=<errorCode>}} 目前值，同上、找不到視為 0。 */
+    private double authVerifyFailuresCount(String errorCodeName) {
+        Counter counter = meterRegistry.find(MetricNames.AUTH_VERIFY_FAILURES)
+                .tag(MetricNames.TAG_REASON, errorCodeName)
+                .counter();
+        return counter == null ? 0.0 : counter.count();
+    }
 
     private record RegisteredDevice(String externalUserId, byte[] credentialId, KeyPair keyPair, String deviceId) {
     }

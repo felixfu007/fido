@@ -5,7 +5,9 @@ import com.fido.server.repository.TenantRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -43,6 +45,11 @@ public class InMemoryTenantRepository implements TenantRepository {
     @Override
     public synchronized Optional<Tenant> findByRpId(String rpId) {
         return byId.values().stream().filter(t -> t.getRpId().equals(rpId)).findFirst();
+    }
+
+    @Override
+    public synchronized List<Tenant> findAll() {
+        return new ArrayList<>(byId.values());
     }
 
     @Override

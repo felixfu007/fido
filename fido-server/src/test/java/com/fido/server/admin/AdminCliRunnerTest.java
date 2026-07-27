@@ -252,6 +252,42 @@ class AdminCliRunnerTest {
     }
 
     // -------------------------------------------------------------------
+    // list-tenants
+    // -------------------------------------------------------------------
+
+    @Test
+    void listTenants_withExistingTenants_printsAllowedFieldsOnlyAndNeverWritesAuditLog() {
+        Tenant tenantA = seedTenant("list-a.example.com");
+        Tenant tenantB = seedTenant("list-b.example.com");
+
+        int exitCode = runner.runListTenants();
+        assertThat(exitCode).isEqualTo(0);
+
+        String output = stdoutCapture.toString(StandardCharsets.UTF_8);
+        assertThat(output).contains("list-a.example.com").contains("list-b.example.com");
+        assertThat(output).contains(tenantA.getTenantUid().toString());
+        assertThat(output).contains(tenantB.getTenantUid().toString());
+        assertThat(output).contains("expected_origin");
+
+        // 嚴禁印出雜湊或前綴——即使 seedTenant() 沒有設定真正的雜湊值，這裡確認的是「輸出格式
+        // 本身沒有 api_key_hash / api_key_prefix 這兩個欄位標籤」，而非只檢查某個具體數值缺席。
+        assertThat(output).doesNotContain("api_key_hash").doesNotContain("api_key_prefix");
+
+        // 唯讀指令：不應寫入任何 audit_log。
+        assertThat(auditLogRepository.findByTenantIdAndUserRefId(tenantA.getTenantId(), null, 10)).isEmpty();
+        assertThat(auditLogRepository.findByTenantIdAndUserRefId(tenantB.getTenantId(), null, 10)).isEmpty();
+    }
+
+    @Test
+    void listTenants_noTenantsExist_printsEmptyResultWithoutError() {
+        int exitCode = runner.runListTenants();
+        assertThat(exitCode).isEqualTo(0);
+
+        String output = stdoutCapture.toString(StandardCharsets.UTF_8);
+        assertThat(output).contains("共 0 筆");
+    }
+
+    // -------------------------------------------------------------------
     // helpers
     // -------------------------------------------------------------------
 

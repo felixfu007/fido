@@ -39,7 +39,7 @@
 ### 2.3 備份檔異地與清理
 
 - 備份目的地建議與資料庫檔案分放不同實體磁碟 / 儲存裝置，並另行同步一份到異地 / 異機（`005` 未含異地同步，須另訂機制）。
-- **舊備份檔清理未包含在 `005` 內**（`005` 檔尾僅提供建議與 `xp_delete_file` 範例，且該擴充預存程序未公開文件化）。建議自訂保留策略（例如 FULL 保留 5 份、DIFF 保留 14 天、LOG 保留 8 天），以 Maintenance Plan 或 OS 層排程（PowerShell / robocopy）實作，避免依賴未公開行為。
+- **舊備份檔清理未包含在 `005` 內**（`005` 檔尾僅提供建議與 `xp_delete_file` 範例，且該擴充預存程序未公開文件化）。建議自訂保留策略（例如 FULL 保留 5 份、DIFF 保留 14 天、LOG 保留 8 天），以 Maintenance Plan 或 OS 層排程（PowerShell / robocopy）實作，避免依賴未公開行為。可調整的 PowerShell 範本（含清理與異地同步、預設乾跑模式）見 `infra/scripts/007_backup_retention_and_offsite_sync.ps1`，套用前請先讀完檔頭說明並依實際環境調整參數。
 
 ### 2.4 還原演練
 
@@ -130,11 +130,17 @@ java -jar fido-server.jar --spring.profiles.active=admin-cli --fido.admin.comman
 
 ## 7. 監控建議
 
+**v1.0.0 起，`fido-server` 額外開通了四個內建業務指標**，經由獨立管理端口（`:8444`，見環境建置手冊 §2.3）的 `GET /actuator/metrics/<name>` 或 `GET /actuator/prometheus`（Prometheus 抓取格式）取得，下表一併列入。這四個指標與既有「靠 `audit_log`/錯誤碼比例估算」的訊號互補（例如 `fido.ratelimit.rejections` 能精準定位到單一租戶，靠估算 429 比例做不到），非取代關係，兩者可並用。
+
 以下訊號建議納入監控與告警：
 
 | 訊號 | 意義 | 建議告警條件 |
 |---|---|---|
-| `/actuator/health` 非 `UP` | 服務不可用 | 立即告警 |
+| `/actuator/health` 非 `UP`（v1.0.0 起在管理端口 `:8444`，非對外的 `8443`，見環境建置手冊 §2.3/§7.1） | 服務不可用 | 立即告警 |
+| `fido.ratelimit.rejections`（tag `tenant`=tenant_uid，`:8444/actuator/metrics` 或 `/actuator/prometheus`） | 個別租戶被限流的次數 | 短時間單一租戶大量增加 → 疑似異常流量/攻擊，或需調整該租戶 `rate_limit_tps`（與上方「429 觸發率」訊號互補，此指標可精準定位到租戶） |
+| `fido.auth.verify.failures`（tag `reason`=錯誤碼，如 `CREDENTIAL_REVOKED`/`ASSERTION_INVALID`/`SIGN_COUNTER_REGRESSION`） | 登入驗證失敗次數，依失敗原因分類 | `reason=SIGN_COUNTER_REGRESSION` 增加 → 對照下方「異常自動撤銷率」；`reason=ASSERTION_INVALID` 大量增加 → 可能是憑證資料損毀或前端整合有誤 |
+| `fido.credential.auto_revocations`（不帶 tag） | sign counter 倒退、憑證被自動撤銷的次數 | 與下方「異常自動撤銷率」為同一件事的 counter 形式，可用於畫圖表/設定告警閾值 |
+| `fido.crossdevice.proximity_mismatch`（不帶 tag） | 跨裝置 QR 登入 proximity 不符次數（S2 warn-only，不擋登入） | 對照下方「跨裝置 QR 登入 proximity 不符率」使用；因不帶 tag，需自行除以同時段登入總量估算比率 |
 | `429 RATE_LIMITED` 觸發率 | 速率限制被打到 | 短時間大量觸發 → 疑似異常流量 / 攻擊，或需調整 TPS |
 | challenge 逾期率（`CHALLENGE_EXPIRED` 比例） | 使用者完成 ceremony 前逾時的比例 | 明顯上升 → 前後端延遲 / 網路 / 時鐘問題 |
 | 異常自動撤銷率（`AUTO_REVOKE_COUNTER_REGRESSION`） | sign counter 倒退次數 | 上升 → **安全可疑訊號**，可能有金鑰複製嘗試，資安應介入 |
@@ -169,7 +175,7 @@ v1 設計目標為**中小規模**（對齊 CLAUDE.md）：
 - **升級前務必先做完整備份**（並確認可還原）。
 - **設定檔審查**：升級後重新核對環境建置手冊第 8 節的部署檢查清單，特別是 `fido.attestation.mode=real`、`poc-trust.enabled=false`、`dev-seed.enabled=false` 這幾項安全開關沒有被新版預設值或設定合併覆蓋回不安全狀態。
 - **JWKS / JWT 相容性**：簽章金鑰持久化於 `signing_keys` 表，**升級與重啟不會更換金鑰**（第 4 節），滾動升級中新舊實例載入的是同一把 `ACTIVE` 金鑰、JWKS 一致，正在交接的 session JWT 不受升級影響。**唯一**會更換金鑰的情況是維運方明確執行 `rotate-signing-key`（第 4.2 節）；若升級流程中刻意排入輪替，才需留意過渡窗口（此時 JWKS 同時發布新舊公鑰，≤120 秒內舊 token 仍可驗簽），建議在低峰執行。
-- **驗證**：升級後跑一次註冊 → 登入 → 撤銷的冒煙測試，並確認 `/actuator/health`、JWKS 端點正常。
+- **驗證**：升級後跑一次註冊 → 登入 → 撤銷的冒煙測試，並確認管理端口 `:8444` 的 `/actuator/health`、以及 `8443` 的 JWKS 端點皆正常。
 
 ---
 
