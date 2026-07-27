@@ -67,8 +67,8 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $FidoServerDir = Join-Path $RepoRoot 'fido-server'
 $ShopDir = Join-Path $RepoRoot 'shopping-site-reference'
-$FidoJar = Join-Path $FidoServerDir 'target\fido-server-1.0.0.jar'
-$ShopJar = Join-Path $ShopDir 'target\shopping-site-reference-1.0.0.jar'
+$FidoJar = Join-Path $FidoServerDir 'target\fido-server-1.1.0.jar'
+$ShopJar = Join-Path $ShopDir 'target\shopping-site-reference-1.1.0.jar'
 $ClasspathFile = Join-Path $FidoServerDir 'target\cross-process-e2e-classpath.txt'
 $RunnerMainClass = 'com.fido.server.e2e.CrossProcessE2EManualRunner'
 

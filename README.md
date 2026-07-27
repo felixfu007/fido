@@ -31,7 +31,7 @@
 - **資料庫**：SQL Server（正式環境）／H2（本機開發，`fido.persistence.mode=memory` 亦可完全略過資料庫跑本機測試）。
 - **CI**：GitHub Actions（`.github/workflows/ci.yml`）——兩個 Maven 專案的單元測試、Android 兩個 flavor 的 JVM 單元測試，以及一個會真的啟動兩個獨立 JVM、跑完整跨行程 HTTP 流程的整合測試 job。
 
-## 目前狀態（v1.0.0）
+## 目前狀態（v1.1.0）
 
 核心功能（WebAuthn 註冊/登入/撤銷、多裝置管理、origin 綁定、租戶隔離、session JWT 交接、IDOR 防護）
 皆已通過自動化測試與**實體 Android 裝置（Pixel 9）端對端驗證**，包含真實 StrongBox 等級硬體金鑰與

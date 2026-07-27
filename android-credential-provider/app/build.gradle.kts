@@ -14,8 +14,8 @@ android {
         applicationId = "com.fido.credentialprovider"
         minSdk = 34
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.0"
+        versionCode = 3
+        versionName = "1.1.0"
     }
 
     // 【診斷/harness 程式碼與正式產物分離】見任務回報「harness 分離」一節與

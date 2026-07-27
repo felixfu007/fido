@@ -34,7 +34,7 @@
 
 - 缺少 / 無效 API Key → `401 UNAUTHENTICATED`。
 - 租戶被停用 → `403 TENANT_DISABLED`。
-- 公開端點例外：`GET /api/v1/.well-known/jwks.json` 不需 API Key。`/actuator/*`（health/info/metrics/prometheus）**v1.0.0 起已移到獨立管理端口 `8444`**，不在對外的 `8443` 上，貴公司串接程式碼不需要也不應該呼叫它；詳見環境建置手冊 §2.3、維護手冊第 7 節。
+- 公開端點例外：`GET /api/v1/.well-known/jwks.json` 不需 API Key。`/actuator/*`（health/info/metrics/prometheus）**v1.1.0 起已移到獨立管理端口 `8444`**，不在對外的 `8443` 上，貴公司串接程式碼不需要也不應該呼叫它；詳見環境建置手冊 §2.3、維護手冊第 7 節。
 
 ### 2.3 速率限制
 

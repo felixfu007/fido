@@ -61,7 +61,7 @@
 
 ## 4. Session JWT 簽章金鑰輪替
 
-### 4.1 v1.0.0 現況
+### 4.1 v1.1.0 現況
 
 `fido-server` 的 session JWT 簽章金鑰（EC P-256 / ES256）**持久化於資料庫 `signing_keys` 表**，並透過 `GET /api/v1/.well-known/jwks.json` 發布對應公鑰。這代表：
 
@@ -130,13 +130,13 @@ java -jar fido-server.jar --spring.profiles.active=admin-cli --fido.admin.comman
 
 ## 7. 監控建議
 
-**v1.0.0 起，`fido-server` 額外開通了四個內建業務指標**，經由獨立管理端口（`:8444`，見環境建置手冊 §2.3）的 `GET /actuator/metrics/<name>` 或 `GET /actuator/prometheus`（Prometheus 抓取格式）取得，下表一併列入。這四個指標與既有「靠 `audit_log`/錯誤碼比例估算」的訊號互補（例如 `fido.ratelimit.rejections` 能精準定位到單一租戶，靠估算 429 比例做不到），非取代關係，兩者可並用。
+**v1.1.0 起，`fido-server` 額外開通了四個內建業務指標**，經由獨立管理端口（`:8444`，見環境建置手冊 §2.3）的 `GET /actuator/metrics/<name>` 或 `GET /actuator/prometheus`（Prometheus 抓取格式）取得，下表一併列入。這四個指標與既有「靠 `audit_log`/錯誤碼比例估算」的訊號互補（例如 `fido.ratelimit.rejections` 能精準定位到單一租戶，靠估算 429 比例做不到），非取代關係，兩者可並用。
 
 以下訊號建議納入監控與告警：
 
 | 訊號 | 意義 | 建議告警條件 |
 |---|---|---|
-| `/actuator/health` 非 `UP`（v1.0.0 起在管理端口 `:8444`，非對外的 `8443`，見環境建置手冊 §2.3/§7.1） | 服務不可用 | 立即告警 |
+| `/actuator/health` 非 `UP`（v1.1.0 起在管理端口 `:8444`，非對外的 `8443`，見環境建置手冊 §2.3/§7.1） | 服務不可用 | 立即告警 |
 | `fido.ratelimit.rejections`（tag `tenant`=tenant_uid，`:8444/actuator/metrics` 或 `/actuator/prometheus`） | 個別租戶被限流的次數 | 短時間單一租戶大量增加 → 疑似異常流量/攻擊，或需調整該租戶 `rate_limit_tps`（與上方「429 觸發率」訊號互補，此指標可精準定位到租戶） |
 | `fido.auth.verify.failures`（tag `reason`=錯誤碼，如 `CREDENTIAL_REVOKED`/`ASSERTION_INVALID`/`SIGN_COUNTER_REGRESSION`） | 登入驗證失敗次數，依失敗原因分類 | `reason=SIGN_COUNTER_REGRESSION` 增加 → 對照下方「異常自動撤銷率」；`reason=ASSERTION_INVALID` 大量增加 → 可能是憑證資料損毀或前端整合有誤 |
 | `fido.credential.auto_revocations`（不帶 tag） | sign counter 倒退、憑證被自動撤銷的次數 | 與下方「異常自動撤銷率」為同一件事的 counter 形式，可用於畫圖表/設定告警閾值 |

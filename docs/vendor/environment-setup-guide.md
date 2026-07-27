@@ -2,7 +2,7 @@
 
 > 適用對象：採用廠商的維運 / 基礎設施團隊，負責在自有環境部署 `fido-server` 與其專屬 SQL Server 資料庫。
 >
-> 本手冊說明 v1.0.0 的部署前置需求、資料庫建置、設定檔鍵值、初始租戶開通、健康檢查與日誌位置。API 串接請另見 [`api-integration-guide.md`](api-integration-guide.md)，已知限制請務必先讀過 [`technical-limitations.md`](technical-limitations.md)。
+> 本手冊說明 v1.1.0 的部署前置需求、資料庫建置、設定檔鍵值、初始租戶開通、健康檢查與日誌位置。API 串接請另見 [`api-integration-guide.md`](api-integration-guide.md)，已知限制請務必先讀過 [`technical-limitations.md`](technical-limitations.md)。
 
 ---
 
@@ -51,7 +51,7 @@
 | 項目 | 說明 |
 |---|---|
 | 對外 API port | `fido-server` 預設監聽 **`8443`**（`application.yml` 的 `server.port`）。貴公司購物網站後端須能以 server-to-server 方式連到此 port。**情境三（跨裝置 QR 登入）啟用時，手機 App 也會直連此 port**（部分端點以 `xdevId` capability 認證、不帶 `X-API-Key`），故不能假設此 port 只對內網/後端可達。 |
-| **管理端口（監控用，v1.0.0 起獨立）** | `fido-server` 的 Actuator（`/actuator/health`、`/actuator/info`、`/actuator/metrics`、`/actuator/prometheus`）**自 v1.0.0 起改監聽獨立的 `8444`**（`application.yml` 的 `management.server.port`），**不再**掛在對外的 `8443`。理由：`/actuator/**` 目前繞過 `ApiKeyAuthFilter` 的 API Key 驗證、且本專案未依賴 Spring Security，若掛在 `8443` 上等於對任何能連到 `8443` 的人完全免認證公開（尤其上一列已說明 `8443` 不能假設是純內網端口）。**部署時務必只對外發布 `8443`，`8444` 只開放給貴公司內部監控來源**（Prometheus/Grafana 等），透過防火牆或 NetworkPolicy 限制來源，`fido-server` 應用層本身不做這層網路隔離。**注意**：本專案刻意不把 `management.server.address` 設為 `127.0.0.1`——若貴公司採容器化部署、以水平擴充多個 pod 的方式運行 `fido-server`，探針（liveness/readiness）通常是連 pod IP 而非 loopback，綁 loopback 會讓健康檢查失效；`8444` 的網路層隔離請務必在部署層（Service/Ingress/NetworkPolicy/防火牆）處理，不要誤以為應用程式已經處理好這一層。 |
+| **管理端口（監控用，v1.1.0 起獨立）** | `fido-server` 的 Actuator（`/actuator/health`、`/actuator/info`、`/actuator/metrics`、`/actuator/prometheus`）**自 v1.1.0 起改監聽獨立的 `8444`**（`application.yml` 的 `management.server.port`），**不再**掛在對外的 `8443`。理由：`/actuator/**` 目前繞過 `ApiKeyAuthFilter` 的 API Key 驗證、且本專案未依賴 Spring Security，若掛在 `8443` 上等於對任何能連到 `8443` 的人完全免認證公開（尤其上一列已說明 `8443` 不能假設是純內網端口）。**部署時務必只對外發布 `8443`，`8444` 只開放給貴公司內部監控來源**（Prometheus/Grafana 等），透過防火牆或 NetworkPolicy 限制來源，`fido-server` 應用層本身不做這層網路隔離。**注意**：本專案刻意不把 `management.server.address` 設為 `127.0.0.1`——若貴公司採容器化部署、以水平擴充多個 pod 的方式運行 `fido-server`，探針（liveness/readiness）通常是連 pod IP 而非 loopback，綁 loopback 會讓健康檢查失效；`8444` 的網路層隔離請務必在部署層（Service/Ingress/NetworkPolicy/防火牆）處理，不要誤以為應用程式已經處理好這一層。 |
 | TLS | 全站強制 TLS（見 API 合約 §1.1）。**注意：`fido-server` 應用層本身並未強制 TLS**（`ApiKeyAuthFilter` 沒有 `isSecure()` 檢查），TLS 應由部署層負責——建議在 `fido-server` 前方架設反向代理（如 Nginx / IIS ARR）或負載平衡器終結 TLS，或另行設定 `server.ssl.*`。正式環境絕不可讓 API 走純 HTTP。此建議對 `8443` 與 `8444` 皆適用。 |
 | 資料庫連線 | `fido-server` → SQL Server（預設 TCP 1433），連線字串預設 `encrypt=true`。此連線應限制在內網、以防火牆限制來源。 |
 | 公開端點（`8443`，不需 API Key） | 只有 `GET /api/v1/.well-known/jwks.json`（JWKS 公鑰）不需 API Key。JWKS 需可被貴公司後端讀取以驗證 session JWT 簽章。**`/actuator/*` 已移到獨立管理端口 `8444`（見上）**，`8443` 上不再提供任何 actuator 端點。 |
@@ -119,7 +119,7 @@
 | 設定鍵 | 預設值 | 說明 |
 |---|---|---|
 | `server.port` | `8443` | 對外 API 監聽 port |
-| `management.server.port` | `8444` | **獨立管理端口**（v1.0.0 起），供 Actuator health/info/metrics/prometheus 使用，**不與 `server.port` 共用**（見 §2.3「管理端口」說明）。部署時務必只對外發布 `8443`。 |
+| `management.server.port` | `8444` | **獨立管理端口**（v1.1.0 起），供 Actuator health/info/metrics/prometheus 使用，**不與 `server.port` 共用**（見 §2.3「管理端口」說明）。部署時務必只對外發布 `8443`。 |
 | `fido.persistence.mode` | `jpa` | **正式部署必須為 `jpa`**（接 SQL Server）。`memory` 為純記憶體、不建 DataSource，僅供本機開發，正式環境嚴禁使用。 |
 | `spring.datasource.url` | `jdbc:sqlserver://REPLACE_WITH_SQLSERVER_HOST:1433;databaseName=FidoServerDb;encrypt=true;trustServerCertificate=false` | 佔位值，須替換為實際主機 |
 | `spring.datasource.username` / `password` | `REPLACE_WITH_...` | 佔位值，建議走環境變數或密碼管理工具 |
@@ -142,7 +142,7 @@
 | `fido.session-jwt.ttl-seconds` | `120` | JWT 有效期（秒）。`exp = iat + 120`。 |
 | `fido.session-jwt.kid` | `2026-fido-1` | **僅**做為「全新資料庫首次啟動、自動產生第一把金鑰時」的初始 `kid` 命名依據。一旦金鑰已存在於 `signing_keys` 表，`kid` 一律以資料庫該列為權威，改此設定值**不會**改變既有金鑰的 `kid`。手動輪替（`rotate-signing-key`）會自動產生新的 `kid`。 |
 
-> **金鑰持久化（v1.0.0 起已內建，非採用廠商需自行實作）**：`fido-server` 的 session JWT 簽章金鑰（EC P-256 / ES256）**持久化於資料庫 `signing_keys` 表**（私鑰以 PKCS#8 存 `VARBINARY`、由 TDE 全庫加密保護），**不是**每次啟動於記憶體重新產生。啟動行為：載入資料庫內既有的唯一 `ACTIVE` 金鑰；**只有全新資料庫（從未有任何金鑰）首次啟動才會自動產生一把並存入**，後續啟動一律載入不重生。因此：
+> **金鑰持久化（v1.1.0 起已內建，非採用廠商需自行實作）**：`fido-server` 的 session JWT 簽章金鑰（EC P-256 / ES256）**持久化於資料庫 `signing_keys` 表**（私鑰以 PKCS#8 存 `VARBINARY`、由 TDE 全庫加密保護），**不是**每次啟動於記憶體重新產生。啟動行為：載入資料庫內既有的唯一 `ACTIVE` 金鑰；**只有全新資料庫（從未有任何金鑰）首次啟動才會自動產生一把並存入**，後續啟動一律載入不重生。因此：
 > - **正常重啟 / 版本升級不會更換金鑰**，先前簽出的 JWT 在其 120 秒效期內仍可正常驗簽。
 > - **多實例部署天然共享同一把 `ACTIVE` 金鑰**（所有連同一資料庫的實例載入同一把），跨實例簽發/驗證一致，**採用廠商不需自行實作任何跨實例金鑰共享機制**。
 > - 更換金鑰只在兩種情況發生：(a) 全新空庫首次啟動自動產生；(b) 平台維運方明確執行 admin CLI 的 `rotate-signing-key` 手動輪替。輪替後 JWKS 會同時發布新舊公鑰，過渡期內舊金鑰簽出、尚未過期（≤120 秒）的 JWT 仍可驗簽。
@@ -278,7 +278,7 @@ CLI 會自動換算 `apk_key_hash_origin`（`android:apk-key-hash:<base64url(指
 
 同一支 admin CLI 也提供 session JWT 簽章金鑰的手動輪替指令，與租戶開通無關，用法與運維時機見 [`maintenance-guide.md`](maintenance-guide.md) 第 4 節。
 
-### 6.5 唯讀租戶清單（`list-tenants`，v1.0.0 起新增）
+### 6.5 唯讀租戶清單（`list-tenants`，v1.1.0 起新增）
 
 需要盤點目前有哪些租戶時，可執行唯讀指令，不需其他參數：
 
@@ -295,7 +295,7 @@ java -jar fido-server.jar --spring.profiles.active=admin-cli \
 
 ### 7.1 健康檢查端點
 
-**v1.0.0 起，以下端點一律在獨立管理端口 `http://<host>:8444` 上，不是 `8443`**（見 §2.3「管理端口」、§4.1 `management.server.port`）：
+**v1.1.0 起，以下端點一律在獨立管理端口 `http://<host>:8444` 上，不是 `8443`**（見 §2.3「管理端口」、§4.1 `management.server.port`）：
 
 - `GET :8444/actuator/health` — 存活 / 就緒檢查（管理端口上不需 API Key，但**不應對外公開**，只開放給貴公司內部監控來源）。回 `UP` 代表服務正常。`show-details=never`，不對外洩漏元件細節。
 - `GET :8444/actuator/info` — 基本資訊端點，回傳 `build.artifact`/`build.name`/`build.version`/`build.time`（供確認實際部署的版本）。
