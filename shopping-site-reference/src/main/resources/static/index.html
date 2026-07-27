@@ -75,6 +75,24 @@
     <pre id="loginLog" class="log"></pre>
   </section>
 
+  <section id="cross-device-section">
+    <h2>4. 情境三：桌機 QR 掃碼跨裝置登入</h2>
+    <p class="note">
+      桌機瀏覽器（本頁）發起、顯示 QR 圖片，手機上已安裝的 FIDO 驗證 APP 掃碼後作為漫遊確認器，
+      用手機上既有、已通過硬體安全模組註冊的憑證做一次真正的 WebAuthn assertion 送回伺服器；
+      本頁輪詢取得結果。QR 圖片下方也保留原始網址文字，方便本機測試時直接複製透過
+      <code>adb</code> 手動送進手機上的 APP（見交付說明——正式環境的 QR 網域若未完成
+      Digital Asset Links 驗證，手機相機掃描後可能只會開啟瀏覽器而非本 APP，這與本頁面
+      本身的正確性無關）。
+    </p>
+    <button id="btnCrossDeviceStart">開始 QR 登入</button>
+    <div id="crossDeviceQrImage"></div>
+    <p>QR 網址：<code id="crossDeviceQrUrl">（尚未產生）</code></p>
+    <p>驗證碼（供人眼比對，非安全機制本體）：<span id="crossDeviceVerificationCode">-</span></p>
+    <p>目前狀態：<span id="crossDeviceStatus">尚未發起</span></p>
+    <pre id="crossDeviceLog" class="log"></pre>
+  </section>
+
   <section id="device-section">
     <h2>3. 裝置管理</h2>
     <p class="note">
@@ -92,6 +110,9 @@
   </section>
 </main>
 
+<!-- 本機隨附的第三方 QR code 產生函式庫，非透過 CDN 載入，見 vendor/NOTICE.md。 -->
+<script src="/vendor/qrcode.js"></script>
+<script src="/vendor/qrcode_UTF8.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

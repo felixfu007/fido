@@ -279,3 +279,75 @@ async function listDevices() {
 }
 
 document.getElementById('btnListDevices').addEventListener('click', listDevices);
+
+// ---------------------------------------------------------------------------
+// 4. 情境三：桌機 QR 掃碼跨裝置登入
+//    POST /shop/api/fido/authentication/cross-device/start -> 顯示 qrUrl
+//    -> 輪詢 GET .../cross-device/poll 直到 CONFIRMED/DENIED/EXPIRED。
+//    注意：start 回應刻意不含 xdevId（能力憑證只透過 httpOnly XDEV_POLL cookie 傳遞，
+//    見 CrossDeviceStartResponseDto/CrossDeviceAuthenticationProxyController 的 Javadoc），
+//    poll 端點因此也不需要、也不接受前端帶任何識別參數，全靠瀏覽器自動夾帶 cookie。
+// ---------------------------------------------------------------------------
+let crossDevicePollTimer = null;
+
+function stopCrossDevicePolling() {
+  if (crossDevicePollTimer) {
+    clearInterval(crossDevicePollTimer);
+    crossDevicePollTimer = null;
+  }
+}
+
+async function pollCrossDeviceStatus() {
+  try {
+    const res = await fetch('/shop/api/fido/authentication/cross-device/poll', { credentials: 'same-origin' });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      log('crossDeviceLog', '輪詢失敗', json || { status: res.status });
+      stopCrossDevicePolling();
+      document.getElementById('crossDeviceStatus').textContent = '輪詢失敗，請重新發起';
+      return;
+    }
+    log('crossDeviceLog', 'poll 回應', json);
+    document.getElementById('crossDeviceStatus').textContent = json.status;
+
+    if (json.status === 'CONFIRMED') {
+      stopCrossDevicePolling();
+      document.getElementById('crossDeviceStatus').textContent =
+        `CONFIRMED（externalUserId=${json.externalUserId}，已建立 SHOP_SESSION）`;
+      await refreshLoginStatus();
+    } else if (json.status === 'DENIED' || json.status === 'EXPIRED') {
+      stopCrossDevicePolling();
+    }
+    // PENDING / SCANNED：繼續輪詢，不做事。
+  } catch (err) {
+    log('crossDeviceLog', '輪詢發生例外', { message: err.message });
+  }
+}
+
+// qrcode.js 的 typeNumber 傳 0 表示自動依內容長度選擇最小可容納的版本；errorCorrectionLevel
+// 用 'M'（中等容錯）是常見預設，QR 內容只是一個 https URL，長度可預期、不需要更高容錯。
+function renderCrossDeviceQrImage(qrUrl) {
+  const container = document.getElementById('crossDeviceQrImage');
+  container.innerHTML = '';
+  const qr = qrcode(0, 'M');
+  qr.addData(qrUrl);
+  qr.make();
+  container.innerHTML = qr.createImgTag(6, 8);
+}
+
+document.getElementById('btnCrossDeviceStart').addEventListener('click', async () => {
+  stopCrossDevicePolling();
+  try {
+    const response = await postJson('/shop/api/fido/authentication/cross-device/start');
+    log('crossDeviceLog', 'start 回應', response);
+    document.getElementById('crossDeviceQrUrl').textContent = response.qrUrl;
+    document.getElementById('crossDeviceVerificationCode').textContent = response.verificationCode || '-';
+    document.getElementById('crossDeviceStatus').textContent = 'PENDING（等待手機掃碼/確認）';
+    renderCrossDeviceQrImage(response.qrUrl);
+
+    // 對齊 S6 的 120 秒 TTL，每 2 秒輪詢一次；到期前端本就該自然收到 EXPIRED 並停止。
+    crossDevicePollTimer = setInterval(pollCrossDeviceStatus, 2000);
+  } catch (err) {
+    log('crossDeviceLog', 'start 失敗', err.body || { message: err.message });
+  }
+});
